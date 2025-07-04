@@ -1,5 +1,6 @@
 """Hex view widget for displaying binary data."""
 
+import logging
 from io import IOBase
 from typing import Optional
 
@@ -8,6 +9,8 @@ from textual.geometry import Size
 from textual.strip import Strip
 from rich.segment import Segment
 from rich.style import Style
+
+logger = logging.getLogger(__name__)
 
 
 def byte_to_ascii(byte: int) -> str:
@@ -42,7 +45,9 @@ class HexView(ScrollView):
             self.virtual_size = Size(self._get_row_width(), lines_needed)
 
             # Debug info
-            self.log(f"File size: {self._file_size}, Lines needed: {lines_needed}, Virtual size: {self.virtual_size}")
+            logger.debug(
+                f"File size: {self._file_size}, Lines needed: {lines_needed}, Virtual size: {self.virtual_size}"
+            )
 
             self.refresh()
 
@@ -54,10 +59,14 @@ class HexView(ScrollView):
 
     def render_line(self, y: int) -> Strip:
         """Render a line of the hex view."""
+        # Get scroll offset and adjust y accordingly
+        scroll_x, scroll_y = self.scroll_offset
+        actual_line = y + scroll_y
+
         # Debug: log render_line calls for first few lines
         if y < 5:
-            self.log(
-                f"render_line called with y={y}, file={self._file is not None}, virtual_height={self.virtual_size.height if hasattr(self, 'virtual_size') else 'unset'}"
+            logger.debug(
+                f"render_line called with y={y}, scroll_y={scroll_y}, actual_line={actual_line}, file={self._file is not None}, virtual_height={self.virtual_size.height if hasattr(self, 'virtual_size') else 'unset'}"
             )
 
         # Handle empty file or out of bounds
@@ -66,11 +75,11 @@ class HexView(ScrollView):
             segment = Segment(line, Style())
             return Strip([segment])
 
-        if y >= self.virtual_size.height:
+        if actual_line >= self.virtual_size.height:
             return Strip.blank(self.size.width)
 
         # Calculate file offset for this line
-        file_offset = y * 16
+        file_offset = actual_line * 16
 
         # Check if offset is beyond file size
         if file_offset >= self._file_size:
@@ -78,12 +87,18 @@ class HexView(ScrollView):
 
         try:
             # Read 16 bytes for this line
+            logger.debug(f"Seeking to {file_offset} for line {actual_line} (y={y})")
             self._file.seek(file_offset)
+            pos_after_seek = self._file.tell()
+            logger.debug(f"Position after seek: {pos_after_seek}")
             chunk = self._file.read(16)
+            logger.debug(f"Read {len(chunk)} bytes: {chunk[:8] if chunk else 'EMPTY'}...")
 
             if not chunk:
+                logger.debug(f"No chunk read for line {actual_line}")
                 return Strip.blank(self.size.width)
         except Exception as e:
+            logger.error(f"Error reading file: {e}")
             line = f"Error reading file: {e}"
             segment = Segment(line, Style())
             return Strip([segment])
@@ -115,6 +130,9 @@ class HexView(ScrollView):
 
         # Build the complete line
         line = f"{hex_offset} {hex_part}  {ascii_part}"
+
+        if y < 3:
+            logger.debug(f"Line {y} formatted as: {line[:50]}...")
 
         # Create segment and strip
         segment = Segment(line, Style())
