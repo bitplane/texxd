@@ -3,7 +3,11 @@
 from pathlib import Path
 from typing import Optional
 
+from textual.app import ComposeResult
+from textual.containers import HorizontalScroll
 from textual.widgets import Static
+
+from .hex_view import HexView
 
 
 class HexEditor(Static):
@@ -12,8 +16,27 @@ class HexEditor(Static):
     def __init__(self) -> None:
         super().__init__()
         self.file_path: Optional[Path] = None
+        self._file_handle = None
+        # Make the hex editor expand to fill available space
+        self.styles.width = "100%"
+        self.styles.height = "100%"
+
+    def compose(self) -> ComposeResult:
+        """Compose the hex editor layout."""
+        with HorizontalScroll():
+            yield HexView()
 
     def open(self, file_path: Path) -> None:
         """Open a file for hex editing."""
         self.file_path = file_path
-        self.update(f"hello {file_path.name}")
+
+        # Close previous file if open
+        if self._file_handle:
+            self._file_handle.close()
+
+        # Open new file
+        self._file_handle = open(file_path, "rb")
+        hex_view = self.query_one(HexView)
+
+        # Ensure the widget is ready before setting file
+        self.call_after_refresh(lambda: hex_view.set_file(self._file_handle))

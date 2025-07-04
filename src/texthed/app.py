@@ -12,7 +12,6 @@ from .hex_editor import HexEditor
 class TexthedApp(App):
     """A hex editor application built with Textual."""
 
-    CSS_PATH = "texthed.tcss"
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
     ]
