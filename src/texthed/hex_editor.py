@@ -36,7 +36,7 @@ class HexEditor(Static):
 
         # Open new file
         self._file_handle = open(file_path, "rb")
-        hex_view = self.query_one(HexView)
 
+        hex_view = self.query_one(HexView)
         # Ensure the widget is ready before setting file
         self.call_after_refresh(lambda: hex_view.set_file(self._file_handle))
