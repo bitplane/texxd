@@ -8,6 +8,7 @@ from textual.containers import HorizontalScroll
 from textual.widgets import Static
 
 from .hex_view import HexView
+from .hex_file import HexFile
 
 
 class HexEditor(Static):
@@ -34,8 +35,9 @@ class HexEditor(Static):
         if self._file_handle:
             self._file_handle.close()
 
-        # Open new file
-        self._file_handle = open(file_path, "rb")
+        # Open new file and wrap with HexFile
+        raw_file = open(file_path, "r+b")
+        self._file_handle = HexFile(raw_file)
 
         hex_view = self.query_one(HexView)
         # Ensure the widget is ready before setting file

@@ -1,8 +1,6 @@
 """Hex view widget for displaying binary data."""
 
 from enum import Enum
-from io import IOBase
-from typing import Optional
 
 from textual import events
 from textual.reactive import reactive
@@ -49,21 +47,19 @@ class HexView(ScrollView):
     cursor_offset: reactive[int] = reactive(0)
     cursor_mode: reactive[CursorMode] = reactive(CursorMode.INACTIVE)
 
-    def __init__(self, file: Optional[IOBase] = None) -> None:
+    def __init__(self, file=None) -> None:
         super().__init__()
         self._file = file
         self._file_size = 0
         self.can_focus = True
         self.styles.height = "100%"
 
-    def set_file(self, file: IOBase) -> None:
+    def set_file(self, file) -> None:
         """Set the file to read from."""
         self._file = file
         if self._file:
             # Get file size
-            self._file.seek(0, 2)  # Seek to end
-            self._file_size = self._file.tell()
-            self._file.seek(0)
+            self._file_size = self._file.size
 
             # Set virtual size based on number of lines needed
             lines_needed = (self._file_size + BYTES_PER_LINE - 1) // BYTES_PER_LINE  # Round up

@@ -1,0 +1,142 @@
+"""File-like object with memory view and write buffer overlay."""
+
+from io import IOBase
+from typing import Dict, Tuple
+
+
+class HexFile:
+    """A file-like object that wraps a file with memory view and write buffer."""
+
+    def __init__(self, file: IOBase):
+        self._file = file
+        self._write_buffer: Dict[int, bytes] = {}
+        self._position = 0
+        self._file_size = self._get_file_size()
+
+    def _get_file_size(self) -> int:
+        """Get the size of the underlying file."""
+        current_pos = self._file.tell()
+        self._file.seek(0, 2)  # Seek to end
+        size = self._file.tell()
+        self._file.seek(current_pos)  # Restore position
+        return size
+
+    @property
+    def size(self) -> int:
+        """Get the current size of the file including unsaved changes."""
+        # For now, return original file size
+        # TODO: Account for write buffer extending file
+        return self._file_size
+
+    def tell(self) -> int:
+        """Get current position."""
+        return self._position
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        """Seek to position."""
+        if whence == 0:  # SEEK_SET
+            self._position = offset
+        elif whence == 1:  # SEEK_CUR
+            self._position += offset
+        elif whence == 2:  # SEEK_END
+            self._position = self._file_size + offset
+
+        # Clamp position to valid range
+        self._position = max(0, min(self._position, self._file_size))
+        return self._position
+
+    def read(self, size: int = -1) -> bytes:
+        """Read bytes from current position."""
+        if size == -1:
+            size = self._file_size - self._position
+
+        if size <= 0:
+            return b""
+
+        # Read from original file
+        self._file.seek(self._position)
+        original_data = self._file.read(size)
+
+        # Apply write buffer overlays
+        result = bytearray(original_data)
+
+        # Find overlapping write buffer entries
+        for buf_offset, buf_data in self._write_buffer.items():
+            # Check if this buffer entry overlaps with our read range
+            read_start = self._position
+            read_end = self._position + len(result)
+            buf_end = buf_offset + len(buf_data)
+
+            # Skip if no overlap
+            if buf_end <= read_start or buf_offset >= read_end:
+                continue
+
+            # Calculate overlap region
+            overlap_start = max(read_start, buf_offset)
+            overlap_end = min(read_end, buf_end)
+
+            # Apply overlay
+            result_start = overlap_start - read_start
+            result_end = overlap_end - read_start
+            buf_start = overlap_start - buf_offset
+            buf_end_slice = buf_start + (overlap_end - overlap_start)
+
+            result[result_start:result_end] = buf_data[buf_start:buf_end_slice]
+
+        self._position += len(result)
+        return bytes(result)
+
+    def write(self, data: bytes) -> int:
+        """Write bytes to buffer at current position."""
+        if not data:
+            return 0
+
+        # Store in write buffer
+        self._write_buffer[self._position] = data
+        bytes_written = len(data)
+        self._position += bytes_written
+
+        # Extend file size if we wrote past end
+        if self._position > self._file_size:
+            self._file_size = self._position
+
+        return bytes_written
+
+    def has_unsaved_changes(self) -> bool:
+        """Check if there are unsaved changes."""
+        return len(self._write_buffer) > 0
+
+    def get_unsaved_ranges(self) -> list[Tuple[int, int]]:
+        """Get list of (start, end) tuples for unsaved byte ranges."""
+        ranges = []
+        for offset, data in self._write_buffer.items():
+            ranges.append((offset, offset + len(data)))
+        return sorted(ranges)
+
+    def save(self) -> None:
+        """Save all changes to the underlying file."""
+        if not self._write_buffer:
+            return
+
+        # Apply all writes to file
+        original_pos = self._file.tell()
+
+        for offset, data in sorted(self._write_buffer.items()):
+            self._file.seek(offset)
+            self._file.write(data)
+
+        # Restore position and clear buffer
+        self._file.seek(original_pos)
+        self._write_buffer.clear()
+
+        # Update file size
+        self._file_size = self._get_file_size()
+
+    def revert(self) -> None:
+        """Discard all unsaved changes."""
+        self._write_buffer.clear()
+        self._file_size = self._get_file_size()
+
+    def close(self) -> None:
+        """Close the underlying file."""
+        self._file.close()

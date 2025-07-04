@@ -14,6 +14,7 @@ from .log import setup_logging
 class TexthedApp(App):
     """A hex editor application built with Textual."""
 
+    TITLE = "TextHed"
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
     ]
