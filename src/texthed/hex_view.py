@@ -18,15 +18,6 @@ BYTES_PER_LINE = 16
 class HexView(ScrollView):
     """A widget that displays binary data using a column-based system."""
 
-    BINDINGS = [
-        ("tab", "next_column", "Next Column"),
-        ("shift+tab", "prev_column", "Previous Column"),
-        ("left,right,up,down", "handle_navigation", "Navigate"),
-        ("home,end", "handle_navigation", "Line Start/End"),
-        ("ctrl+home,ctrl+end", "handle_navigation", "File Start/End"),
-        ("pageup,pagedown", "handle_navigation", "Page Up/Down"),
-    ]
-
     def __init__(self, file=None) -> None:
         super().__init__()
         self._file = file
@@ -100,10 +91,12 @@ class HexView(ScrollView):
             lines_needed = (self._file_size + BYTES_PER_LINE - 1) // BYTES_PER_LINE
             self.virtual_size = Size(self.virtual_size.width, lines_needed)
 
-            # Update cursor file sizes
+            # Update cursor file sizes and view height
             for column in self.columns:
                 if column.cursor:
                     column.cursor.set_file_size(self._file_size)
+                    if hasattr(self, "size"):
+                        column.cursor.set_view_height(self.size.height)
 
             self.refresh()
 
@@ -114,16 +107,26 @@ class HexView(ScrollView):
                 column.cursor.position = position
         self.refresh()
 
-    def _on_scroll_request(self, line: int) -> None:
+    def _on_scroll_request(self, cursor_line: int) -> None:
         """Handle scroll requests from cursors."""
-        if hasattr(self, "size") and self.size.height > 0:
-            visible_top = self.scroll_y
-            visible_bottom = visible_top + self.size.height - 1
+        if not hasattr(self, "size") or self.size.height <= 0:
+            return
 
-            if line < visible_top:
-                self.scroll_to(y=line)
-            elif line > visible_bottom:
-                self.scroll_to(y=line - self.size.height + 1)
+        # Keep cursor in view
+        visible_top = self.scroll_y
+        visible_bottom = visible_top + self.size.height - 1
+
+        if cursor_line < visible_top:
+            # Cursor went above view - scroll to show it at top
+            self.scroll_to(y=cursor_line, animate=False)
+        elif cursor_line > visible_bottom:
+            # Cursor went below view - scroll to show it at bottom
+            # But make sure we reveal as much content as possible
+            new_scroll = cursor_line - self.size.height + 1
+            # Don't scroll past the end unnecessarily
+            max_scroll = max(0, self.virtual_size.height - self.size.height)
+            new_scroll = min(new_scroll, max_scroll)
+            self.scroll_to(y=new_scroll, animate=False)
 
     def on_focus(self, event: events.Focus) -> None:
         """Handle focus gained."""
@@ -134,6 +137,13 @@ class HexView(ScrollView):
         """Handle focus lost."""
         for column in self.columns:
             column.blur()
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Handle resize events to update cursor view height."""
+        # Update cursor view heights when terminal is resized
+        for column in self.columns:
+            if column.cursor:
+                column.cursor.set_view_height(event.size.height)
 
     def action_next_column(self) -> None:
         """Move to next interactive column."""
@@ -173,18 +183,61 @@ class HexView(ScrollView):
             self.columns[column_index].focus()
             self.refresh()
 
-    def action_handle_navigation(self, event: events.Key) -> None:
-        """Handle navigation events by forwarding to current column."""
-        if self.current_column_index < len(self.columns) and self.columns[self.current_column_index].cursor:
-            self.columns[self.current_column_index].handle_event(event)
-
     def on_key(self, event: events.Key) -> None:
         """Handle key events by forwarding to current column."""
+        # Handle tab keys first
+        if event.key == "tab":
+            self.action_next_column()
+            event.prevent_default()
+            event.stop()
+            return
+        elif event.key == "shift+tab":
+            self.action_prev_column()
+            event.prevent_default()
+            event.stop()
+            return
+
+        # Intercept home/end keys before ScrollView can handle them
+        if event.key in ("home", "end"):
+            if self.current_column_index < len(self.columns) and self.columns[self.current_column_index].handle_event(
+                event
+            ):
+                event.prevent_default()
+                event.stop()
+                return
+
+        # Handle page up/down specially to maintain screen position
+        if event.key in ("pageup", "pagedown"):
+            if self.current_column_index < len(self.columns) and self.columns[self.current_column_index].cursor:
+                cursor = self.columns[self.current_column_index].cursor
+                old_y = cursor.y
+                current_scroll = self.scroll_y
+
+                # Move cursor
+                if self.columns[self.current_column_index].handle_event(event):
+                    # Calculate how much cursor moved
+                    new_y = cursor.y
+                    cursor_moved = new_y - old_y
+
+                    # Move scroll by same amount to keep cursor in same screen position
+                    new_scroll = current_scroll + cursor_moved
+                    new_scroll = max(0, min(new_scroll, max(0, self.virtual_size.height - self.size.height)))
+                    self.scroll_to(y=new_scroll, animate=False)
+
+                    event.prevent_default()
+                    event.stop()
+                    return
+
+        # Forward other keys to current column
         if self.current_column_index < len(self.columns) and self.columns[self.current_column_index].handle_event(
             event
         ):
             event.prevent_default()
             event.stop()
+            return
+
+        # Let other handlers process keys we don't handle
+        pass
 
     def render_line(self, y: int) -> Strip:
         """Render a line using the column system."""

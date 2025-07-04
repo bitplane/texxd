@@ -37,8 +37,8 @@ class HexColumn(DataColumn):
             hex_text = f"{byte:02x}"
             segments.append(Segment(hex_text, style))
 
-            # Add space after each byte (except the last)
-            if i < len(data) - 1:
+            # Add space after each byte (except when at end of line)
+            if i < self.bytes_per_line - 1:
                 segments.append(Segment(" ", Style()))
 
         # Pad with spaces if line is shorter than bytes_per_line

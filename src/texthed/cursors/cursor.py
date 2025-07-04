@@ -23,6 +23,7 @@ class Cursor(Highlighter):
         bytes_per_line: int = 16,
         on_position_changed: Optional[Callable[[int], None]] = None,
         on_scroll_request: Optional[Callable[[int], None]] = None,
+        view_height: int = 10,
     ):
         """Initialize cursor.
 
@@ -35,6 +36,7 @@ class Cursor(Highlighter):
         self.position = 0
         self.file_size = file_size
         self.bytes_per_line = bytes_per_line
+        self.view_height = 10  # Default, will be updated by view
         self.is_active = False
         self.on_position_changed = on_position_changed
         self.on_scroll_request = on_scroll_request
@@ -43,9 +45,19 @@ class Cursor(Highlighter):
         self.active_style = Style(bgcolor="bright_white", color="black")
         self.inactive_style = Style(bgcolor="grey30", color="grey70")
 
+    @property
+    def x(self) -> int:
+        """Get x coordinate (column within line)."""
+        return self.position % self.bytes_per_line
+
+    @property
+    def y(self) -> int:
+        """Get y coordinate (line number)."""
+        return self.position // self.bytes_per_line
+
     def highlight(self, data: bytes, file_offset: int, styles: List[Optional[Style]]) -> None:
         """Apply cursor highlighting to the styles array."""
-        if not data:
+        if not data or not self.is_active:
             return
 
         # Check if cursor is in this data range
@@ -56,9 +68,8 @@ class Cursor(Highlighter):
             # Calculate index within this data chunk
             cursor_index = self.position - data_start
 
-            # Apply cursor style
-            cursor_style = self.active_style if self.is_active else self.inactive_style
-            styles[cursor_index] = self._combine_styles(styles[cursor_index], cursor_style)
+            # Apply cursor style (only when active)
+            styles[cursor_index] = self._combine_styles(styles[cursor_index], self.active_style)
 
     def _combine_styles(self, existing: Optional[Style], new: Style) -> Style:
         """Combine an existing style with a new style."""
@@ -82,47 +93,90 @@ class Cursor(Highlighter):
         handled = True
 
         if key == "left":
-            self._move_cursor(-1)
+            self.move_x(-1)
         elif key == "right":
-            self._move_cursor(1)
+            self.move_x(1)
         elif key == "up":
-            self._move_cursor(-self.bytes_per_line)
+            self.move_y(-1)
         elif key == "down":
-            self._move_cursor(self.bytes_per_line)
-        elif key == "home":
-            self._move_to_line_start()
-        elif key == "end":
-            self._move_to_line_end()
+            self.move_y(1)
+        elif key == "home" or key == "\x01":  # Home or Ctrl+A
+            self.set_x(0)
+        elif key == "end" or key == "\x04":  # End or Ctrl+D
+            self.set_x(self.bytes_per_line - 1)
         elif key == "ctrl+home":
             self._move_to_file_start()
         elif key == "ctrl+end":
             self._move_to_file_end()
         elif key == "pageup":
-            self._page_up()
+            self.move_y(-self.view_height)
         elif key == "pagedown":
-            self._page_down()
+            self.move_y(self.view_height)
         else:
             handled = False
 
         return handled
 
-    def _move_cursor(self, delta: int) -> None:
-        """Move cursor by delta bytes, respecting file bounds."""
-        new_position = self.position + delta
+    def move_x(self, delta: int) -> None:
+        """Move cursor horizontally with wrapping."""
+        new_x = self.x + delta
+        current_y = self.y
+
+        # Handle wrapping
+        if new_x < 0:
+            # Wrap to previous line
+            if current_y > 0:
+                new_y = current_y - 1
+                new_x = self.bytes_per_line - 1
+                new_position = new_y * self.bytes_per_line + new_x
+                self._set_position(max(0, min(new_position, self.file_size - 1)))
+        elif new_x >= self.bytes_per_line:
+            # Wrap to next line
+            max_y = (self.file_size - 1) // self.bytes_per_line
+            if current_y < max_y:
+                new_y = current_y + 1
+                new_x = 0
+                new_position = new_y * self.bytes_per_line + new_x
+                self._set_position(max(0, min(new_position, self.file_size - 1)))
+        else:
+            # Normal horizontal movement
+            new_position = current_y * self.bytes_per_line + new_x
+            self._set_position(max(0, min(new_position, self.file_size - 1)))
+
+    def move_y(self, delta: int) -> None:
+        """Move cursor vertically, preserving x position."""
+        current_x = self.x
+        current_y = self.y
+        new_y = current_y + delta
+
+        # Calculate max y we can reach with current x
+        max_possible_y = (self.file_size - 1 - current_x) // self.bytes_per_line
+
+        # Clamp the movement
+        new_y = max(0, min(new_y, max_possible_y))
+
+        # If no movement possible, return
+        if new_y == current_y:
+            return
+
+        new_position = new_y * self.bytes_per_line + current_x
+        self._set_position(new_position)
+
+    def set_x(self, x: int) -> None:
+        """Set x coordinate (column within line)."""
+        current_y = self.y
+        new_x = max(0, min(x, self.bytes_per_line - 1))
+        new_position = current_y * self.bytes_per_line + new_x
         self._set_position(max(0, min(new_position, self.file_size - 1)))
 
-    def _move_to_line_start(self) -> None:
-        """Move cursor to start of current line."""
-        current_line = self.position // self.bytes_per_line
-        line_start = current_line * self.bytes_per_line
-        self._set_position(line_start)
-
-    def _move_to_line_end(self) -> None:
-        """Move cursor to end of current line."""
-        current_line = self.position // self.bytes_per_line
-        line_start = current_line * self.bytes_per_line
-        line_end = min(line_start + self.bytes_per_line - 1, self.file_size - 1)
-        self._set_position(line_end)
+    def set_y(self, y: int) -> None:
+        """Set y coordinate (line number), preserving x position."""
+        current_x = self.x
+        max_y = max(0, (self.file_size - 1) // self.bytes_per_line)
+        new_y = max(0, min(y, max_y))
+        new_position = new_y * self.bytes_per_line + current_x
+        new_position = min(new_position, self.file_size - 1)
+        self._set_position(new_position)
 
     def _move_to_file_start(self) -> None:
         """Move cursor to start of file."""
@@ -130,17 +184,8 @@ class Cursor(Highlighter):
 
     def _move_to_file_end(self) -> None:
         """Move cursor to end of file."""
-        self._set_position(self.file_size - 1)
-
-    def _page_up(self) -> None:
-        """Move cursor up one page."""
-        # For now, just move up 10 lines (this would need view height info)
-        self._move_cursor(-self.bytes_per_line * 10)
-
-    def _page_down(self) -> None:
-        """Move cursor down one page."""
-        # For now, just move down 10 lines (this would need view height info)
-        self._move_cursor(self.bytes_per_line * 10)
+        if self.file_size > 0:
+            self._set_position(self.file_size - 1)
 
     def _set_position(self, new_position: int) -> None:
         """Set cursor position and notify callbacks."""
@@ -169,3 +214,7 @@ class Cursor(Highlighter):
         self.file_size = file_size
         if self.position >= file_size:
             self._set_position(max(0, file_size - 1))
+
+    def set_view_height(self, view_height: int) -> None:
+        """Update the view height for page up/down calculations."""
+        self.view_height = view_height
