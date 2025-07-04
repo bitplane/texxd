@@ -41,8 +41,8 @@ class HexFile:
         elif whence == 2:  # SEEK_END
             self._position = self._file_size + offset
 
-        # Clamp position to valid range
-        self._position = max(0, min(self._position, self._file_size))
+        # Clamp position to valid range (allow seeking beyond end for writes)
+        self._position = max(0, self._position)
         return self._position
 
     def read(self, size: int = -1) -> bytes:
@@ -53,14 +53,25 @@ class HexFile:
         if size <= 0:
             return b""
 
-        # Read from original file
+        # Calculate how much data we can actually read
+        max_read_size = self._file_size - self._position
+        actual_read_size = min(size, max_read_size)
+
+        if actual_read_size <= 0:
+            return b""
+
+        # Read from original file up to its actual size
         self._file.seek(self._position)
-        original_data = self._file.read(size)
+        original_file_size = self._get_file_size()
+        bytes_to_read_from_file = min(actual_read_size, max(0, original_file_size - self._position))
+        original_data = self._file.read(bytes_to_read_from_file)
+
+        # Create result buffer, extending with zeros if we're reading beyond original file
+        result = bytearray(original_data)
+        if len(result) < actual_read_size:
+            result.extend(b"\x00" * (actual_read_size - len(result)))
 
         # Apply write buffer overlays
-        result = bytearray(original_data)
-
-        # Find overlapping write buffer entries
         for buf_offset, buf_data in self._write_buffer.items():
             # Check if this buffer entry overlaps with our read range
             read_start = self._position
