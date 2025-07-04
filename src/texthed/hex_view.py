@@ -22,6 +22,7 @@ class CursorMode(Enum):
 
     HEX = "hex"
     ASCII = "ascii"
+    INACTIVE = "inactive"  # Widget not focused
 
 
 def byte_to_ascii(byte: int) -> str:
@@ -35,14 +36,18 @@ class HexView(ScrollView):
     """A widget that displays binary data in hex format."""
 
     BINDINGS = [
-        ("tab", "toggle_cursor_mode", "Toggle Hex/ASCII"),
+        ("tab", "tab_mode", "Hex→ASCII→Tab Out"),
+        ("shift+tab", "shift_tab_mode", "ASCII→Hex→Tab Back"),
+        ("return", "toggle_cursor_mode", "Toggle Hex/ASCII"),
         ("left,right,up,down", "move_cursor", "Navigate"),
         ("home,end", "move_cursor_line", "Line Start/End"),
+        ("ctrl+home,ctrl+end", "move_cursor_file", "File Start/End"),
+        ("pageup,pagedown", "move_cursor_page", "Page Up/Down"),
     ]
 
     # Reactive properties for cursor
     cursor_offset: reactive[int] = reactive(0)
-    cursor_mode: reactive[CursorMode] = reactive(CursorMode.HEX)
+    cursor_mode: reactive[CursorMode] = reactive(CursorMode.INACTIVE)
 
     def __init__(self, file: Optional[IOBase] = None) -> None:
         super().__init__()
@@ -71,12 +76,18 @@ class HexView(ScrollView):
             return
 
         # Clamp cursor to file bounds
-        self.cursor_offset = max(0, min(new_offset, self._file_size - 1))
+        clamped_offset = max(0, min(new_offset, self._file_size - 1))
+
+        # Avoid infinite recursion by checking if we're setting to the same value
+        if clamped_offset == self.cursor_offset:
+            return
+
+        self.cursor_offset = clamped_offset
 
         # Calculate which line the cursor is on
         cursor_line = self.cursor_offset // BYTES_PER_LINE
 
-        # Auto-scroll if cursor is off screen
+        # Auto-scroll if cursor is off screen (but page up/down handle their own scrolling)
         visible_top = self.scroll_y
         visible_bottom = visible_top + self.size.height - 1
 
@@ -91,40 +102,123 @@ class HexView(ScrollView):
         """Handle cursor mode changes."""
         self.refresh()
 
+    def on_focus(self, event: events.Focus) -> None:
+        """Handle focus gained - start in hex mode."""
+        if self._file and self.cursor_mode == CursorMode.INACTIVE:
+            self.cursor_mode = CursorMode.HEX
+
+    def on_blur(self, event: events.Blur) -> None:
+        """Handle focus lost - go to inactive mode."""
+        self.cursor_mode = CursorMode.INACTIVE
+
     def on_key(self, event: events.Key) -> None:
         """Handle key presses for cursor navigation and mode switching."""
-        if not self._file:
+        if not self._file or self.cursor_mode == CursorMode.INACTIVE:
             return
 
         key = event.key
 
         if key == "tab":
-            # Switch between hex and ASCII modes
+            if self.cursor_mode == CursorMode.HEX:
+                # Switch to ASCII mode
+                self.cursor_mode = CursorMode.ASCII
+                event.prevent_default()
+                event.stop()
+            else:
+                # Let tab continue to next widget
+                pass
+        elif key == "shift+tab":
+            if self.cursor_mode == CursorMode.ASCII:
+                # Switch back to hex mode
+                self.cursor_mode = CursorMode.HEX
+                event.prevent_default()
+                event.stop()
+            else:
+                # Let shift+tab continue to previous widget
+                pass
+        elif key == "return":
+            # Toggle between hex and ASCII modes
             self.cursor_mode = CursorMode.ASCII if self.cursor_mode == CursorMode.HEX else CursorMode.HEX
             event.prevent_default()
+            event.stop()
         elif key == "left":
             self.cursor_offset = max(0, self.cursor_offset - 1)
             event.prevent_default()
+            event.stop()
         elif key == "right":
             self.cursor_offset = min(self._file_size - 1, self.cursor_offset + 1)
             event.prevent_default()
+            event.stop()
         elif key == "up":
             self.cursor_offset = max(0, self.cursor_offset - BYTES_PER_LINE)
             event.prevent_default()
+            event.stop()
         elif key == "down":
             self.cursor_offset = min(self._file_size - 1, self.cursor_offset + BYTES_PER_LINE)
             event.prevent_default()
+            event.stop()
         elif key == "home":
             # Move to start of current line
             line_start = (self.cursor_offset // BYTES_PER_LINE) * BYTES_PER_LINE
             self.cursor_offset = line_start
             event.prevent_default()
+            event.stop()
         elif key == "end":
             # Move to end of current line
             line_start = (self.cursor_offset // BYTES_PER_LINE) * BYTES_PER_LINE
             line_end = min(line_start + BYTES_PER_LINE - 1, self._file_size - 1)
             self.cursor_offset = line_end
             event.prevent_default()
+            event.stop()
+        elif key == "ctrl+home":
+            # Move to start of file
+            self.cursor_offset = 0
+            event.prevent_default()
+            event.stop()
+        elif key == "ctrl+end":
+            # Move to end of file
+            self.cursor_offset = self._file_size - 1
+            event.prevent_default()
+            event.stop()
+        elif key == "pageup":
+            # Scroll view up one page, then adjust cursor to maintain relative position
+            lines_per_page = self.size.height
+            current_cursor_line = self.cursor_offset // BYTES_PER_LINE
+            current_view_top = self.scroll_y
+            cursor_relative_to_view = current_cursor_line - current_view_top
+
+            # Scroll up by one page
+            new_view_top = max(0, current_view_top - lines_per_page)
+            self.scroll_to(y=new_view_top)
+
+            # Position cursor at same relative position in new view
+            new_cursor_line = new_view_top + cursor_relative_to_view
+            new_cursor_line = max(0, min(new_cursor_line, (self._file_size - 1) // BYTES_PER_LINE))
+            self.cursor_offset = new_cursor_line * BYTES_PER_LINE + (self.cursor_offset % BYTES_PER_LINE)
+            self.cursor_offset = max(0, min(self.cursor_offset, self._file_size - 1))
+
+            event.prevent_default()
+            event.stop()
+        elif key == "pagedown":
+            # Scroll view down one page, then adjust cursor to maintain relative position
+            lines_per_page = self.size.height
+            current_cursor_line = self.cursor_offset // BYTES_PER_LINE
+            current_view_top = self.scroll_y
+            cursor_relative_to_view = current_cursor_line - current_view_top
+
+            # Scroll down by one page
+            max_scroll = max(0, self.virtual_size.height - lines_per_page)
+            new_view_top = min(max_scroll, current_view_top + lines_per_page)
+            self.scroll_to(y=new_view_top)
+
+            # Position cursor at same relative position in new view
+            new_cursor_line = new_view_top + cursor_relative_to_view
+            new_cursor_line = max(0, min(new_cursor_line, (self._file_size - 1) // BYTES_PER_LINE))
+            self.cursor_offset = new_cursor_line * BYTES_PER_LINE + (self.cursor_offset % BYTES_PER_LINE)
+            self.cursor_offset = max(0, min(self.cursor_offset, self._file_size - 1))
+
+            event.prevent_default()
+            event.stop()
 
     def render_line(self, y: int) -> Strip:
         """Render a line of the hex view."""
@@ -193,11 +287,13 @@ class HexView(ScrollView):
             byte_str = f"{byte:02x}"
 
             if cursor_on_this_line and j == cursor_byte_index:
-                # Bright highlight for current cursor position
-                if self.cursor_mode == CursorMode.HEX:
-                    style = Style(bgcolor="bright_white", color="black")
+                # Highlight for cursor position
+                if self.cursor_mode == CursorMode.INACTIVE:
+                    style = Style(bgcolor="grey30", color="grey70")  # Grey when inactive
+                elif self.cursor_mode == CursorMode.HEX:
+                    style = Style(bgcolor="bright_white", color="black")  # Bright when active
                 else:
-                    style = Style(bgcolor="white", color="black")
+                    style = Style(bgcolor="white", color="black")  # Dim when other mode active
             else:
                 style = Style()
 
@@ -221,11 +317,13 @@ class HexView(ScrollView):
             ascii_char = byte_to_ascii(byte)
 
             if cursor_on_this_line and j == cursor_byte_index:
-                # Bright highlight for current cursor position
-                if self.cursor_mode == CursorMode.ASCII:
-                    style = Style(bgcolor="bright_white", color="black")
+                # Highlight for cursor position
+                if self.cursor_mode == CursorMode.INACTIVE:
+                    style = Style(bgcolor="grey30", color="grey70")  # Grey when inactive
+                elif self.cursor_mode == CursorMode.ASCII:
+                    style = Style(bgcolor="bright_white", color="black")  # Bright when active
                 else:
-                    style = Style(bgcolor="white", color="black")
+                    style = Style(bgcolor="white", color="black")  # Dim when other mode active
             else:
                 style = Style()
 
