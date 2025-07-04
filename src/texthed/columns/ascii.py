@@ -1,6 +1,6 @@
 """ASCII column for displaying data in ASCII format."""
 
-from typing import List
+from typing import List, Optional
 from rich.segment import Segment
 from rich.style import Style
 
@@ -37,3 +37,8 @@ class AsciiColumn(DataColumn):
             segments.append(Segment(" ", Style()))
 
         return segments
+
+    def calculate_click_position(self, click_offset: int) -> Optional[int]:
+        """Calculate byte position within ASCII column from click offset."""
+        # ASCII column: simple 1 char per byte
+        return min(click_offset, self.bytes_per_line - 1)

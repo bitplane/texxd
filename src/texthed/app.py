@@ -8,6 +8,7 @@ from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer
 
 from .hex_editor import HexEditor
+from .hex_view import HexView
 from .log import setup_logging
 
 
@@ -33,6 +34,9 @@ class TexthedApp(App):
         """Handle mount event."""
         if self.file_path:
             self.query_one(HexEditor).open(self.file_path)
+
+        # Focus the hex view widget so navigation works immediately
+        self.call_after_refresh(lambda: self.query_one(HexView).focus())
 
     def action_quit(self) -> None:
         """Quit the application."""

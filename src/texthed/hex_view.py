@@ -52,7 +52,7 @@ class HexView(ScrollView):
 
         # Create columns
         self.columns = [
-            AddressColumn(),
+            AddressColumn(file_size=self._file_size),
             HexColumn(bytes_per_line=BYTES_PER_LINE, cursor=hex_cursor),
             AsciiColumn(bytes_per_line=BYTES_PER_LINE, cursor=ascii_cursor),
         ]
@@ -76,8 +76,8 @@ class HexView(ScrollView):
     def _calculate_width(self) -> None:
         """Calculate total display width from all columns."""
         total_width = sum(col.width for col in self.columns)
-        # Add spaces between columns
-        total_width += len(self.columns) - 1
+        # Add spaces between columns and extra space at end
+        total_width += len(self.columns)
         self.virtual_size = Size(total_width, self.virtual_size.height if hasattr(self, "virtual_size") else 0)
 
     def set_file(self, file) -> None:
@@ -98,6 +98,13 @@ class HexView(ScrollView):
                     if hasattr(self, "size"):
                         column.cursor.set_view_height(self.size.height)
 
+            # Update address column file size
+            if self.columns and hasattr(self.columns[0], "set_file_size"):
+                self.columns[0].set_file_size(self._file_size)
+
+            # Recalculate width since address column width may have changed
+            self._calculate_width()
+
             self.refresh()
 
     def _on_cursor_position_changed(self, position: int) -> None:
@@ -112,20 +119,19 @@ class HexView(ScrollView):
         if not hasattr(self, "size") or self.size.height <= 0:
             return
 
-        # Keep cursor in view
+        # Ensure cursor y+1 is always visible (eliminates edge cases)
         visible_top = self.scroll_y
         visible_bottom = visible_top + self.size.height - 1
 
         if cursor_line < visible_top:
             # Cursor went above view - scroll to show it at top
             self.scroll_to(y=cursor_line, animate=False)
-        elif cursor_line > visible_bottom:
-            # Cursor went below view - scroll to show it at bottom
-            # But make sure we reveal as much content as possible
-            new_scroll = cursor_line - self.size.height + 1
-            # Don't scroll past the end unnecessarily
+        elif cursor_line + 1 > visible_bottom:
+            # Cursor line + 1 is not visible - scroll to show cursor y+1
+            new_scroll = cursor_line + 1 - self.size.height + 1
+            # Don't scroll past the end
             max_scroll = max(0, self.virtual_size.height - self.size.height)
-            new_scroll = min(new_scroll, max_scroll)
+            new_scroll = min(max(0, new_scroll), max_scroll)
             self.scroll_to(y=new_scroll, animate=False)
 
     def on_focus(self, event: events.Focus) -> None:
@@ -239,6 +245,46 @@ class HexView(ScrollView):
         # Let other handlers process keys we don't handle
         pass
 
+    def on_click(self, event: events.Click) -> None:
+        """Handle mouse clicks to position cursor."""
+        # Calculate which line was clicked
+        clicked_line = int(event.y + self.scroll_y)
+
+        # Calculate file offset for this line
+        file_offset = clicked_line * BYTES_PER_LINE
+
+        # Don't allow clicking past end of file
+        if file_offset >= self._file_size:
+            return
+
+        # Calculate which column was clicked
+        x = int(event.x)
+        current_x = 0
+
+        for i, column in enumerate(self.columns):
+            column_width = column.width
+            if i > 0:  # Add space between columns
+                current_x += 1
+
+            if x >= current_x and x < current_x + column_width:
+                click_offset = x - current_x
+
+                # Only handle clicks on columns with cursors
+                if column.cursor:
+                    # Let the column calculate the position
+                    pos_in_column = column.calculate_click_position(click_offset)
+                    if pos_in_column is not None:
+                        new_position = file_offset + pos_in_column
+                        if new_position < self._file_size:
+                            # Switch to clicked column
+                            self._switch_to_column(i)
+                            # Set cursor position
+                            column.cursor.position = new_position
+                            self._on_cursor_position_changed(new_position)
+                return
+
+            current_x += column_width
+
     def render_line(self, y: int) -> Strip:
         """Render a line using the column system."""
         # Get scroll offset and adjust y accordingly
@@ -274,6 +320,9 @@ class HexView(ScrollView):
 
             column_segments = column.render_line(chunk, file_offset, actual_line)
             all_segments.extend(column_segments)
+
+        # Add extra space at end of row
+        all_segments.append(Segment(" ", None))
 
         # Create and crop strip
         strip = Strip(all_segments)

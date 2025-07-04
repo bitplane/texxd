@@ -1,6 +1,6 @@
 """Hex column for displaying data in hexadecimal format."""
 
-from typing import List
+from typing import List, Optional
 from rich.segment import Segment
 from rich.style import Style
 
@@ -16,9 +16,9 @@ class HexColumn(DataColumn):
 
     @property
     def width(self) -> int:
-        """Hex column width: 2 chars per byte + space + extra space after 8 bytes."""
-        # 16 bytes = 32 hex chars + 15 spaces + 1 extra space = 48 chars
-        return self.bytes_per_line * 3 - 1 + (1 if self.bytes_per_line > 8 else 0)
+        """Hex column width: 2 chars per byte + space + extra space after 8 bytes + trailing space."""
+        # 16 bytes = 32 hex chars + 15 spaces + 1 extra space + 1 trailing space = 49 chars
+        return self.bytes_per_line * 3 - 1 + (1 if self.bytes_per_line > 8 else 0) + 1
 
     def render_line(self, data: bytes, file_offset: int, line_number: int) -> List[Segment]:
         """Render the hex representation of the data."""
@@ -49,4 +49,35 @@ class HexColumn(DataColumn):
             if i < self.bytes_per_line - 1:
                 segments.append(Segment(" ", Style()))
 
+        # Add trailing space
+        segments.append(Segment(" ", Style()))
+
         return segments
+
+    def calculate_click_position(self, click_offset: int) -> Optional[int]:
+        """Calculate byte position within hex column from click offset."""
+        # Hex column: "XX XX XX XX  XX XX XX XX XX XX XX XX XX XX XX XX "
+        # Each byte is 3 chars (XX + space), with extra space after 8 bytes
+
+        pos = 0
+        current_offset = 0
+
+        while pos < self.bytes_per_line and current_offset < click_offset:
+            # Add extra space after 8 bytes
+            if pos == 8:
+                current_offset += 1
+                if current_offset >= click_offset:
+                    break
+
+            # Each byte takes 2 chars for hex + 1 space (except last)
+            byte_end = current_offset + 2
+            if pos < self.bytes_per_line - 1:
+                byte_end += 1  # Add space
+
+            if click_offset <= byte_end:
+                break
+
+            current_offset = byte_end
+            pos += 1
+
+        return min(pos, self.bytes_per_line - 1)

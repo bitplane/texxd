@@ -99,3 +99,14 @@ class DataColumn(ABC):
         self.has_focus = False
         if self.cursor:
             self.cursor.on_blur()
+
+    def calculate_click_position(self, click_offset: int) -> Optional[int]:
+        """Calculate byte position within this column from click offset.
+
+        Args:
+            click_offset: X position within this column
+
+        Returns:
+            Byte position within the line (0-15), or None if invalid
+        """
+        return None  # Base implementation - only override in clickable columns
