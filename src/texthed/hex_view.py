@@ -75,26 +75,18 @@ class HexView(ScrollView):
         if not self._file or self._file_size == 0:
             return
 
-        # Clamp cursor to file bounds
-        clamped_offset = max(0, min(new_offset, self._file_size - 1))
-
-        # Avoid infinite recursion by checking if we're setting to the same value
-        if clamped_offset == self.cursor_offset:
-            return
-
-        self.cursor_offset = clamped_offset
-
         # Calculate which line the cursor is on
-        cursor_line = self.cursor_offset // BYTES_PER_LINE
+        cursor_line = new_offset // BYTES_PER_LINE
 
-        # Auto-scroll if cursor is off screen (but page up/down handle their own scrolling)
-        visible_top = self.scroll_y
-        visible_bottom = visible_top + self.size.height - 1
+        # Auto-scroll if cursor is off screen
+        if hasattr(self, "size") and self.size.height > 0:
+            visible_top = self.scroll_y
+            visible_bottom = visible_top + self.size.height - 1
 
-        if cursor_line < visible_top:
-            self.scroll_to(y=cursor_line)
-        elif cursor_line > visible_bottom:
-            self.scroll_to(y=cursor_line - self.size.height + 1)
+            if cursor_line < visible_top:
+                self.scroll_to(y=cursor_line)
+            elif cursor_line > visible_bottom:
+                self.scroll_to(y=cursor_line - self.size.height + 1)
 
         self.refresh()
 
@@ -110,6 +102,15 @@ class HexView(ScrollView):
     def on_blur(self, event: events.Blur) -> None:
         """Handle focus lost - go to inactive mode."""
         self.cursor_mode = CursorMode.INACTIVE
+
+    def _move_cursor(self, delta_bytes: int) -> None:
+        """Move cursor by delta bytes, respecting file bounds."""
+        if not self._file:
+            return
+
+        new_offset = self.cursor_offset + delta_bytes
+        # Clamp to file bounds
+        self.cursor_offset = max(0, min(new_offset, self._file_size - 1))
 
     def on_key(self, event: events.Key) -> None:
         """Handle key presses for cursor navigation and mode switching."""
@@ -142,30 +143,32 @@ class HexView(ScrollView):
             event.prevent_default()
             event.stop()
         elif key == "left":
-            self.cursor_offset = max(0, self.cursor_offset - 1)
+            self._move_cursor(-1)
             event.prevent_default()
             event.stop()
         elif key == "right":
-            self.cursor_offset = min(self._file_size - 1, self.cursor_offset + 1)
+            self._move_cursor(1)
             event.prevent_default()
             event.stop()
         elif key == "up":
-            self.cursor_offset = max(0, self.cursor_offset - BYTES_PER_LINE)
+            self._move_cursor(-BYTES_PER_LINE)
             event.prevent_default()
             event.stop()
         elif key == "down":
-            self.cursor_offset = min(self._file_size - 1, self.cursor_offset + BYTES_PER_LINE)
+            self._move_cursor(BYTES_PER_LINE)
             event.prevent_default()
             event.stop()
         elif key == "home":
             # Move to start of current line
-            line_start = (self.cursor_offset // BYTES_PER_LINE) * BYTES_PER_LINE
+            current_line = self.cursor_offset // BYTES_PER_LINE
+            line_start = current_line * BYTES_PER_LINE
             self.cursor_offset = line_start
             event.prevent_default()
             event.stop()
         elif key == "end":
             # Move to end of current line
-            line_start = (self.cursor_offset // BYTES_PER_LINE) * BYTES_PER_LINE
+            current_line = self.cursor_offset // BYTES_PER_LINE
+            line_start = current_line * BYTES_PER_LINE
             line_end = min(line_start + BYTES_PER_LINE - 1, self._file_size - 1)
             self.cursor_offset = line_end
             event.prevent_default()
@@ -186,16 +189,23 @@ class HexView(ScrollView):
             current_cursor_line = self.cursor_offset // BYTES_PER_LINE
             current_view_top = self.scroll_y
             cursor_relative_to_view = current_cursor_line - current_view_top
+            horizontal_position = self.cursor_offset % BYTES_PER_LINE
 
-            # Scroll up by one page
+            # Scroll up by one page (or to start if not enough data)
             new_view_top = max(0, current_view_top - lines_per_page)
             self.scroll_to(y=new_view_top)
 
-            # Position cursor at same relative position in new view
-            new_cursor_line = new_view_top + cursor_relative_to_view
-            new_cursor_line = max(0, min(new_cursor_line, (self._file_size - 1) // BYTES_PER_LINE))
-            self.cursor_offset = new_cursor_line * BYTES_PER_LINE + (self.cursor_offset % BYTES_PER_LINE)
-            self.cursor_offset = max(0, min(self.cursor_offset, self._file_size - 1))
+            # If we hit the top, put cursor at start of file but preserve horizontal position
+            if new_view_top == 0 and current_view_top > 0:
+                # We've hit the beginning - put cursor at start but keep horizontal position
+                target_offset = min(horizontal_position, self._file_size - 1)
+                self.cursor_offset = target_offset
+            else:
+                # Normal page up - maintain relative position
+                new_cursor_line = new_view_top + cursor_relative_to_view
+                new_cursor_line = max(0, min(new_cursor_line, (self._file_size - 1) // BYTES_PER_LINE))
+                target_offset = new_cursor_line * BYTES_PER_LINE + horizontal_position
+                self.cursor_offset = max(0, min(target_offset, self._file_size - 1))
 
             event.prevent_default()
             event.stop()
@@ -205,17 +215,18 @@ class HexView(ScrollView):
             current_cursor_line = self.cursor_offset // BYTES_PER_LINE
             current_view_top = self.scroll_y
             cursor_relative_to_view = current_cursor_line - current_view_top
+            horizontal_position = self.cursor_offset % BYTES_PER_LINE
 
-            # Scroll down by one page
+            # Scroll down by one page (or to end if not enough data)
             max_scroll = max(0, self.virtual_size.height - lines_per_page)
             new_view_top = min(max_scroll, current_view_top + lines_per_page)
             self.scroll_to(y=new_view_top)
 
-            # Position cursor at same relative position in new view
+            # Always try to maintain relative position first
             new_cursor_line = new_view_top + cursor_relative_to_view
             new_cursor_line = max(0, min(new_cursor_line, (self._file_size - 1) // BYTES_PER_LINE))
-            self.cursor_offset = new_cursor_line * BYTES_PER_LINE + (self.cursor_offset % BYTES_PER_LINE)
-            self.cursor_offset = max(0, min(self.cursor_offset, self._file_size - 1))
+            target_offset = new_cursor_line * BYTES_PER_LINE + horizontal_position
+            self.cursor_offset = max(0, min(target_offset, self._file_size - 1))
 
             event.prevent_default()
             event.stop()
