@@ -67,3 +67,10 @@ class AsciiColumn(Column):
     def on_key(self, event: events.Key) -> bool:
         """Handle key events for the column."""
         return self.cursor.handle_event(event)
+
+    def get_byte_position(self, x: int, y: int) -> Optional[int]:
+        """Get byte position from column coordinates."""
+        byte_in_line = self.calculate_click_position(x)
+        if byte_in_line is not None:
+            return y * self.bytes_per_line + byte_in_line
+        return None

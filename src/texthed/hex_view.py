@@ -67,10 +67,8 @@ class HexView(ScrollView):
         self._hex_column.add_highlighter(self._hex_column.cursor)
         self._ascii_column.add_highlighter(self._ascii_column.cursor)
 
-        # Set initial focused column and activate its cursor
-        self._focused_column = self._hex_column
-        self._hex_column.cursor.is_active = True
-        self._ascii_column.cursor.is_active = False
+        # Set initial focused column
+        self._set_active_column(self._hex_column)
 
         # Ensure HexView has focus to receive key events
         self.focus()
@@ -85,6 +83,20 @@ class HexView(ScrollView):
         for column in self._columns:
             column._get_line_data = get_line_data
 
+    def _set_active_column(self, column) -> None:
+        """Set the active/focused column."""
+        if column == self._focused_column:
+            return
+
+        # Deactivate current column's cursor
+        if self._focused_column and hasattr(self._focused_column, "cursor"):
+            self._focused_column.cursor.is_active = False
+
+        # Activate new column's cursor
+        self._focused_column = column
+        if hasattr(column, "cursor"):
+            column.cursor.is_active = True
+
     def _tab(self, back=False) -> bool:
         """Tab to next/previous focusable column."""
         focusable = [col for col in self._columns if hasattr(col, "cursor")]
@@ -96,9 +108,7 @@ class HexView(ScrollView):
             delta = -1 if back else 1
             new_idx = (current_idx + delta) % len(focusable)
 
-            self._focused_column.cursor.is_active = False
-            self._focused_column = focusable[new_idx]
-            self._focused_column.cursor.is_active = True
+            self._set_active_column(focusable[new_idx])
             return True
         except ValueError:
             return False
@@ -225,6 +235,36 @@ class HexView(ScrollView):
         if handled:
             event.stop()
 
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        """Handle mouse click events."""
+        # Calculate which column was clicked
+        x = event.x + int(self.scroll_x)
+        y = event.y + int(self.scroll_y)
+
+        # Find which column was clicked
+        current_x = 0
+        for column in self._columns:
+            column_width = column.get_content_width()
+            if x < current_x + column_width:
+                if hasattr(column, "cursor"):
+                    # Switch focus if needed
+                    self._set_active_column(column)
+
+                    # Get byte position directly from column
+                    column_x = x - current_x
+                    byte_position = column.get_byte_position(column_x, y)
+
+                    if byte_position is not None:
+                        old_position = column.cursor.position
+                        column.cursor._set_position(byte_position)
+
+                        # If cursor moved, handle the movement
+                        if column.cursor.position != old_position:
+                            self._handle_cursor_move(column.cursor.position)
+                        self.refresh()
+                break
+            current_x += column_width + 1  # +1 for space between columns
+
     def render_line(self, y: int) -> Strip:
         """Render a single line of the hex view."""
         # The y parameter is in viewport space, need to add scroll offset
@@ -241,4 +281,12 @@ class HexView(ScrollView):
             if i < len(rendered_columns) - 1:
                 combined_segments.append(Segment(" "))
 
-        return Strip(combined_segments)
+        # Create the full strip
+        full_strip = Strip(combined_segments)
+
+        # Crop for horizontal scrolling
+        scroll_x = int(self.scroll_x)
+        viewport_width = self.size.width
+        cropped_strip = full_strip.crop(scroll_x, scroll_x + viewport_width)
+
+        return cropped_strip

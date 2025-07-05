@@ -117,6 +117,16 @@ class Cursor(Highlighter, Widget):
             True if the event was handled, False otherwise
         """
         logger.debug(f"Cursor.handle_event: {event}")
+
+        if isinstance(event, events.MouseDown):
+            # Handle mouse clicks
+            if hasattr(self.parent_column, "get_byte_position"):
+                position = self.parent_column.get_byte_position(event.x, event.y)
+                if position is not None:
+                    self._set_position(position)
+                    return True
+            return False
+
         if not isinstance(event, events.Key):
             logger.debug("Not a key event")
             return False
