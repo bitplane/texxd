@@ -23,7 +23,8 @@ dev = [
     "pytest-cov",
     "build",
     "twine",
-    "ruff"
+    "ruff",
+    "pytest-asyncio"
 ]
 
 [build-system]
