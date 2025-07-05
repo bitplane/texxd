@@ -3,8 +3,10 @@
 from typing import List, Optional
 from rich.style import Style
 
+from .highlighter import Highlighter
 
-class NewlineHighlighter:
+
+class NewlineHighlighter(Highlighter):
     """Highlights newline characters (0x0a and 0x0d) like xxd."""
 
     def __init__(self):

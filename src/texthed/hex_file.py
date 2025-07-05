@@ -2,6 +2,9 @@
 
 from io import RawIOBase
 from typing import Dict, Tuple
+from .log import get_logger
+
+logger = get_logger(__name__)
 
 
 class HexFile(RawIOBase):

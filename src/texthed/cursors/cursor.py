@@ -1,13 +1,34 @@
 """Base cursor class for hex editor navigation and highlighting."""
 
-from typing import Optional, List, Callable
+from typing import Optional, List
 from rich.style import Style
 from textual import events
+from textual.widget import Widget
+from textual.message import Message
 
-from ..highlighter import Highlighter
+from ..highlighters.highlighter import Highlighter
+from ..log import get_logger
+
+logger = get_logger(__name__)
 
 
-class Cursor(Highlighter):
+class CursorMoved(Message):
+    """Message sent when cursor position changes."""
+
+    def __init__(self, position: int) -> None:
+        self.position = position
+        super().__init__()
+
+
+class ScrollRequest(Message):
+    """Message sent to request scrolling to a specific line."""
+
+    def __init__(self, line: int) -> None:
+        self.line = line
+        super().__init__()
+
+
+class Cursor(Highlighter, Widget):
     """Base cursor class that handles navigation and provides highlighting.
 
     A cursor is a special highlighter that:
@@ -19,31 +40,40 @@ class Cursor(Highlighter):
 
     def __init__(
         self,
-        file_size: int = 0,
         bytes_per_line: int = 16,
-        on_position_changed: Optional[Callable[[int], None]] = None,
-        on_scroll_request: Optional[Callable[[int], None]] = None,
         view_height: int = 10,
+        parent_column=None,
+        name: Optional[str] = None,
+        id: Optional[str] = None,
+        classes: Optional[str] = None,
+        disabled: bool = False,
     ):
         """Initialize cursor.
 
         Args:
-            file_size: Size of the file in bytes
             bytes_per_line: Number of bytes per line
-            on_position_changed: Callback when cursor position changes
-            on_scroll_request: Callback to request scroll to line
+            view_height: Height of the view for page up/down calculations
         """
+        Highlighter.__init__(self)
+        Widget.__init__(self, name=name, id=id, classes=classes, disabled=disabled)
         self.position = 0
-        self.file_size = file_size
+        self.parent_column = parent_column
         self.bytes_per_line = bytes_per_line
-        self.view_height = 10  # Default, will be updated by view
         self.is_active = False
-        self.on_position_changed = on_position_changed
-        self.on_scroll_request = on_scroll_request
 
         # Styles for different states
         self.active_style = Style(bgcolor="bright_white", color="black")
         self.inactive_style = Style(bgcolor="grey30", color="grey70")
+
+    @property
+    def file_size(self) -> int:
+        """Get current file size from parent column."""
+        return self.parent_column.file_size
+
+    @property
+    def view_height(self) -> int:
+        """Get current view height from hex view."""
+        return self.hex_view.size.height
 
     @property
     def x(self) -> int:
@@ -86,10 +116,13 @@ class Cursor(Highlighter):
         Returns:
             True if the event was handled, False otherwise
         """
+        logger.debug(f"Cursor.handle_event: {event}")
         if not isinstance(event, events.Key):
+            logger.debug("Not a key event")
             return False
 
         key = event.key
+        logger.debug(f"Cursor handling key: {key}")
         handled = True
 
         if key == "left":
@@ -119,6 +152,7 @@ class Cursor(Highlighter):
 
     def move_x(self, delta: int) -> None:
         """Move cursor horizontally with wrapping."""
+        old_pos = self.position
         new_x = self.x + delta
         current_y = self.y
 
@@ -143,8 +177,11 @@ class Cursor(Highlighter):
             new_position = current_y * self.bytes_per_line + new_x
             self._set_position(max(0, min(new_position, self.file_size - 1)))
 
+        logger.debug(f"move_x({delta}): {old_pos} -> {self.position}")
+
     def move_y(self, delta: int) -> None:
         """Move cursor vertically, preserving x position."""
+        old_pos = self.position
         current_x = self.x
         current_y = self.y
         new_y = current_y + delta
@@ -157,10 +194,12 @@ class Cursor(Highlighter):
 
         # If no movement possible, return
         if new_y == current_y:
+            logger.debug(f"move_y({delta}): no movement from {old_pos}")
             return
 
         new_position = new_y * self.bytes_per_line + current_x
         self._set_position(new_position)
+        logger.debug(f"move_y({delta}): {old_pos} -> {self.position}")
 
     def set_x(self, x: int) -> None:
         """Set x coordinate (column within line)."""
@@ -184,22 +223,25 @@ class Cursor(Highlighter):
 
     def _move_to_file_end(self) -> None:
         """Move cursor to end of file."""
-        if self.file_size > 0:
-            self._set_position(self.file_size - 1)
+        file_size = self.file_size
+        if file_size > 0:
+            self._set_position(file_size - 1)
 
     def _set_position(self, new_position: int) -> None:
         """Set cursor position and notify callbacks."""
+        logger.debug(f"_set_position: {self.position} -> {new_position}, file_size={self.file_size}")
         if new_position != self.position:
             self.position = new_position
+            logger.debug(f"Position updated to {self.position}")
 
             # Notify position change
-            if self.on_position_changed:
-                self.on_position_changed(self.position)
+            self.post_message(CursorMoved(self.position))
 
             # Request scroll if needed
-            if self.on_scroll_request:
-                cursor_line = self.position // self.bytes_per_line
-                self.on_scroll_request(cursor_line)
+            cursor_line = self.position // self.bytes_per_line
+            self.post_message(ScrollRequest(cursor_line))
+        else:
+            logger.debug("No position change needed")
 
     def on_focus(self) -> None:
         """Called when cursor gains focus."""
@@ -208,13 +250,3 @@ class Cursor(Highlighter):
     def on_blur(self) -> None:
         """Called when cursor loses focus."""
         self.is_active = False
-
-    def set_file_size(self, file_size: int) -> None:
-        """Update file size and clamp position if needed."""
-        self.file_size = file_size
-        if self.position >= file_size:
-            self._set_position(max(0, file_size - 1))
-
-    def set_view_height(self, view_height: int) -> None:
-        """Update the view height for page up/down calculations."""
-        self.view_height = view_height

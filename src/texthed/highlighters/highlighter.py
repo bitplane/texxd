@@ -1,12 +1,11 @@
 """Highlighter interface for styling bytes in hex editor."""
 
-from typing import Protocol, List, Optional
+from typing import List, Optional
 from rich.style import Style
 
 
-class Highlighter(Protocol):
-    """Protocol for highlighting bytes in the hex editor.
-
+class Highlighter:
+    """
     A highlighter takes a block of bytes with their file offset and current styles,
     then modifies the styles array to apply highlighting effects.
     """
@@ -21,4 +20,4 @@ class Highlighter(Protocol):
                    Each element can be None or an existing Style.
                    Highlighters should modify this list in-place.
         """
-        ...
+        pass

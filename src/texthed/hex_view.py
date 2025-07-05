@@ -1,123 +1,186 @@
-"""Hex view widget for displaying binary data using column system."""
+"""Hex view widget using Textual widget-based columns."""
 
-from typing import List
-from textual import events
+from textual.app import ComposeResult
 from textual.scroll_view import ScrollView
+from textual.reactive import reactive
 from textual.geometry import Size
+from textual import events
 from textual.strip import Strip
 from rich.segment import Segment
 
-from .columns import DataColumn, AddressColumn, HexColumn, AsciiColumn
-from .cursors import Cursor
+from .columns import AddressColumn, HexColumn, AsciiColumn, Column
 from .highlighters import NewlineHighlighter
+from .cursors.cursor import CursorMoved, ScrollRequest
+from .log import get_logger
 
-# Constants
-BYTES_PER_LINE = 16
+logger = get_logger(__name__)
 
 
 class HexView(ScrollView):
-    """A widget that displays binary data using a column-based system."""
+    """A widget that displays binary data using widget-based columns."""
+
+    cursor_position = reactive(0)
+    file_size = reactive(0)
+
+    DEFAULT_BYTES_PER_LINE = 16
+
+    CSS = """
+    Column {
+        border: solid red;
+    }
+    """
 
     def __init__(self, file=None) -> None:
         super().__init__()
         self._file = file
-        self._file_size = 0
         self.can_focus = True
         self.styles.height = "100%"
+        self._columns: list[Column] = []
+        self._address_column: AddressColumn | None = None
+        self._hex_column: HexColumn | None = None
+        self._ascii_column: AsciiColumn | None = None
+        self._focused_column: Column | None = None
 
-        # Initialize columns
-        self.columns: List[DataColumn] = []
-        self.current_column_index = 0
-        self._setup_columns()
+    def compose(self) -> ComposeResult:
+        """Compose the hex view layout."""
+        self._address_column = AddressColumn(bytes_per_line=self.DEFAULT_BYTES_PER_LINE)
+        self._hex_column = HexColumn(bytes_per_line=self.DEFAULT_BYTES_PER_LINE)
+        self._ascii_column = AsciiColumn(bytes_per_line=self.DEFAULT_BYTES_PER_LINE)
+        self._columns = [self._address_column, self._hex_column, self._ascii_column]
+        # Don't use Horizontal container - we'll handle the layout in render_line
+        return []
 
-        # Calculate total width
-        self._calculate_width()
+    def on_mount(self) -> None:
+        """Handle mount event."""
+        # Setup data access for columns
+        self._setup_data_access()
 
-    def _setup_columns(self) -> None:
-        """Setup the standard hex editor columns."""
-        # Create cursors that will be shared (they track the same position)
-        hex_cursor = Cursor(
-            file_size=self._file_size,
-            bytes_per_line=BYTES_PER_LINE,
-            on_position_changed=self._on_cursor_position_changed,
-            on_scroll_request=self._on_scroll_request,
-        )
+        # Add highlighters to data columns
+        self._hex_column.add_highlighter(NewlineHighlighter())
+        self._ascii_column.add_highlighter(NewlineHighlighter())
 
-        ascii_cursor = Cursor(
-            file_size=self._file_size,
-            bytes_per_line=BYTES_PER_LINE,
-            on_position_changed=self._on_cursor_position_changed,
-            on_scroll_request=self._on_scroll_request,
-        )
+        # Set hex view reference for cursor size access
+        self._hex_column.cursor.hex_view = self
+        self._ascii_column.cursor.hex_view = self
 
-        # Create columns
-        self.columns = [
-            AddressColumn(file_size=self._file_size),
-            HexColumn(bytes_per_line=BYTES_PER_LINE, cursor=hex_cursor),
-            AsciiColumn(bytes_per_line=BYTES_PER_LINE, cursor=ascii_cursor),
-        ]
+        # Add cursors as highlighters
+        self._hex_column.add_highlighter(self._hex_column.cursor)
+        self._ascii_column.add_highlighter(self._ascii_column.cursor)
 
-        # Add highlighters to data columns (not address)
-        newline_highlighter = NewlineHighlighter()
-        self.columns[1].add_highlighter(newline_highlighter)  # Hex column
-        self.columns[2].add_highlighter(newline_highlighter)  # ASCII column
+        # Set initial focused column and activate its cursor
+        self._focused_column = self._hex_column
+        self._hex_column.cursor.is_active = True
+        self._ascii_column.cursor.is_active = False
 
-        # Add cursors as highlighters to their respective columns
-        self.columns[1].add_highlighter(hex_cursor)  # Hex column
-        self.columns[2].add_highlighter(ascii_cursor)  # ASCII column
+        # Ensure HexView has focus to receive key events
+        self.focus()
 
-        # Focus first interactive column
-        for i, column in enumerate(self.columns):
-            if column.cursor:
-                self.current_column_index = i
-                column.focus()
-                break
+    def _setup_data_access(self) -> None:
+        """Setup data access method for all columns."""
 
-    def _calculate_width(self) -> None:
-        """Calculate total display width from all columns."""
-        total_width = sum(col.width for col in self.columns)
-        # Add spaces between columns and extra space at end
-        total_width += len(self.columns)
-        self.virtual_size = Size(total_width, self.virtual_size.height if hasattr(self, "virtual_size") else 0)
+        def get_line_data(file_offset: int) -> bytes:
+            return self._read_chunk(file_offset)
+
+        # Inject data access method into all columns
+        for column in self._columns:
+            column._get_line_data = get_line_data
+
+    def _tab(self, back=False) -> bool:
+        """Tab to next/previous focusable column."""
+        focusable = [col for col in self._columns if hasattr(col, "cursor")]
+        if not focusable or not self._focused_column:
+            return False
+
+        try:
+            current_idx = focusable.index(self._focused_column)
+            delta = -1 if back else 1
+            new_idx = (current_idx + delta) % len(focusable)
+
+            self._focused_column.cursor.is_active = False
+            self._focused_column = focusable[new_idx]
+            self._focused_column.cursor.is_active = True
+            return True
+        except ValueError:
+            return False
 
     def set_file(self, file) -> None:
         """Set the file to read from."""
         self._file = file
         if self._file:
-            # Get file size
-            self._file_size = self._file.size
+            self.file_size = self._file.size
 
             # Set virtual size based on number of lines needed
-            lines_needed = (self._file_size + BYTES_PER_LINE - 1) // BYTES_PER_LINE
-            self.virtual_size = Size(self.virtual_size.width, lines_needed)
+            lines_needed = (self.file_size + self.DEFAULT_BYTES_PER_LINE - 1) // self.DEFAULT_BYTES_PER_LINE
 
-            # Update cursor file sizes and view height
-            for column in self.columns:
-                if column.cursor:
-                    column.cursor.set_file_size(self._file_size)
-                    if hasattr(self, "size"):
-                        column.cursor.set_view_height(self.size.height)
+            # Calculate total width from all columns
+            total_width = 0
+            for column in self._columns:
+                column.file_size = self.file_size
+                total_width += column.get_content_width()
 
-            # Update address column file size
-            if self.columns and hasattr(self.columns[0], "set_file_size"):
-                self.columns[0].set_file_size(self._file_size)
+            # Add spaces between columns
+            total_width += len(self._columns) - 1
 
-            # Recalculate width since address column width may have changed
-            self._calculate_width()
-
+            self.virtual_size = Size(total_width, lines_needed)
             self.refresh()
+            self.scroll_to(y=0)
+            logger.debug(
+                f"set_file: file_size={self.file_size}, lines_needed={lines_needed}, virtual_size.height={self.virtual_size.height}"
+            )
 
-    def _on_cursor_position_changed(self, position: int) -> None:
-        """Handle cursor position changes - sync all cursors."""
-        for column in self.columns:
-            if column.cursor:
+    def _read_chunk(self, file_offset: int) -> bytes:
+        """Read a chunk of bytes from the file at the given offset."""
+        if not self._file:
+            return b""
+
+        try:
+            self._file.seek(file_offset)
+            data = self._file.read(self.DEFAULT_BYTES_PER_LINE)
+            logger.debug(f"_read_chunk: file_offset={file_offset}, data_len={len(data)}")
+            return data
+        except Exception as e:
+            logger.error(f"_read_chunk error: {e}")
+            return b""
+
+    def on_cursor_moved(self, message: CursorMoved) -> None:
+        """Handle cursor movement messages from columns."""
+        position = message.position
+        self.cursor_position = position
+
+        # Sync all columns
+        for column in self._columns:
+            if isinstance(column, (HexColumn, AsciiColumn)) and column.cursor and column.cursor.position != position:
+                column.cursor_position = position
+
+        # Handle scrolling to keep cursor visible
+        self._scroll_to_cursor(position)
+
+    def on_scroll_request(self, message: ScrollRequest) -> None:
+        """Handle scroll request messages from columns."""
+        self._scroll_to_cursor(message.line * self.DEFAULT_BYTES_PER_LINE)
+
+    def _handle_cursor_move(self, position: int) -> None:
+        """Handle cursor movement - sync between columns and scroll if needed."""
+        # Sync cursor position between columns
+        for column in self._columns:
+            if hasattr(column, "cursor") and column.cursor.position != position:
                 column.cursor.position = position
+
+        # Update reactive cursor position
+        self.cursor_position = position
+
+        # Handle scrolling
+        self._scroll_to_cursor(position)
+
+        # Refresh to show cursor update
         self.refresh()
 
-    def _on_scroll_request(self, cursor_line: int) -> None:
-        """Handle scroll requests from cursors."""
+    def _scroll_to_cursor(self, position: int) -> None:
+        """Scroll to keep cursor position visible."""
         if not hasattr(self, "size") or self.size.height <= 0:
             return
+
+        cursor_line = position // self.DEFAULT_BYTES_PER_LINE
 
         # Ensure cursor y+1 is always visible (eliminates edge cases)
         visible_top = self.scroll_y
@@ -134,204 +197,48 @@ class HexView(ScrollView):
             new_scroll = min(max(0, new_scroll), max_scroll)
             self.scroll_to(y=new_scroll, animate=False)
 
-    def on_focus(self, event: events.Focus) -> None:
-        """Handle focus gained."""
-        if self.columns and self.current_column_index < len(self.columns):
-            self.columns[self.current_column_index].focus()
-
-    def on_blur(self, event: events.Blur) -> None:
-        """Handle focus lost."""
-        for column in self.columns:
-            column.blur()
-
-    def on_resize(self, event: events.Resize) -> None:
-        """Handle resize events to update cursor view height."""
-        # Update cursor view heights when terminal is resized
-        for column in self.columns:
-            if column.cursor:
-                column.cursor.set_view_height(event.size.height)
-
-    def action_next_column(self) -> None:
-        """Move to next interactive column."""
-        if not self.columns:
-            return
-
-        # Find next column with cursor
-        start_index = self.current_column_index
-        for i in range(len(self.columns)):
-            next_index = (start_index + 1 + i) % len(self.columns)
-            if self.columns[next_index].cursor:
-                self._switch_to_column(next_index)
-                return
-
-    def action_prev_column(self) -> None:
-        """Move to previous interactive column."""
-        if not self.columns:
-            return
-
-        # Find previous column with cursor
-        start_index = self.current_column_index
-        for i in range(len(self.columns)):
-            prev_index = (start_index - 1 - i) % len(self.columns)
-            if self.columns[prev_index].cursor:
-                self._switch_to_column(prev_index)
-                return
-
-    def _switch_to_column(self, column_index: int) -> None:
-        """Switch focus to specified column."""
-        if 0 <= column_index < len(self.columns):
-            # Blur current column
-            if self.current_column_index < len(self.columns):
-                self.columns[self.current_column_index].blur()
-
-            # Focus new column
-            self.current_column_index = column_index
-            self.columns[column_index].focus()
-            self.refresh()
-
     def on_key(self, event: events.Key) -> None:
-        """Handle key events by forwarding to current column."""
-        # Handle tab keys first
-        if event.key == "tab":
-            self.action_next_column()
-            event.prevent_default()
+        """Handle key events."""
+        logger.debug(f"HexView received key: {event.key}, focused: {self.has_focus}")
+        # Since columns are not mounted widgets, we need to manually handle focus
+        handled = False
+
+        # Pass key events to the currently focused column
+        if self._focused_column and hasattr(self._focused_column, "on_key"):
+            logger.debug(f"Passing key to focused column: {self._focused_column.__class__.__name__}")
+            old_position = self._focused_column.cursor.position
+            handled = self._focused_column.on_key(event)
+
+            # If cursor moved, manually sync and handle scrolling
+            if self._focused_column.cursor.position != old_position:
+                logger.debug(f"Cursor moved from {old_position} to {self._focused_column.cursor.position}")
+                self._handle_cursor_move(self._focused_column.cursor.position)
+                handled = True
+
+        # Tab/Shift+Tab to switch columns
+        if not handled and event.key in ("tab", "shift+tab"):
+            handled = self._tab(back=event.key == "shift+tab")
+            if handled:
+                self.refresh()
+
+        # Prevent default key handling only if the event was handled
+        if handled:
             event.stop()
-            return
-        elif event.key == "shift+tab":
-            self.action_prev_column()
-            event.prevent_default()
-            event.stop()
-            return
-
-        # Intercept home/end keys before ScrollView can handle them
-        if event.key in ("home", "end"):
-            if self.current_column_index < len(self.columns) and self.columns[self.current_column_index].handle_event(
-                event
-            ):
-                event.prevent_default()
-                event.stop()
-                return
-
-        # Handle page up/down specially to maintain screen position
-        if event.key in ("pageup", "pagedown"):
-            if self.current_column_index < len(self.columns) and self.columns[self.current_column_index].cursor:
-                cursor = self.columns[self.current_column_index].cursor
-                old_y = cursor.y
-                current_scroll = self.scroll_y
-
-                # Move cursor
-                if self.columns[self.current_column_index].handle_event(event):
-                    # Calculate how much cursor moved
-                    new_y = cursor.y
-                    cursor_moved = new_y - old_y
-
-                    # Move scroll by same amount to keep cursor in same screen position
-                    new_scroll = current_scroll + cursor_moved
-                    new_scroll = max(0, min(new_scroll, max(0, self.virtual_size.height - self.size.height)))
-                    self.scroll_to(y=new_scroll, animate=False)
-
-                    event.prevent_default()
-                    event.stop()
-                    return
-
-        # Forward other keys to current column
-        if self.current_column_index < len(self.columns) and self.columns[self.current_column_index].handle_event(
-            event
-        ):
-            event.prevent_default()
-            event.stop()
-            return
-
-        # Let other handlers process keys we don't handle
-        pass
-
-    def on_click(self, event: events.Click) -> None:
-        """Handle mouse clicks to position cursor."""
-        # Calculate which line was clicked
-        clicked_line = int(event.y + self.scroll_y)
-
-        # Calculate file offset for this line
-        file_offset = clicked_line * BYTES_PER_LINE
-
-        # Don't allow clicking past end of file
-        if file_offset >= self._file_size:
-            return
-
-        # Calculate which column was clicked
-        x = int(event.x)
-        current_x = 0
-
-        for i, column in enumerate(self.columns):
-            column_width = column.width
-            if i > 0:  # Add space between columns
-                current_x += 1
-
-            if x >= current_x and x < current_x + column_width:
-                click_offset = x - current_x
-
-                # Only handle clicks on columns with cursors
-                if column.cursor:
-                    # Let the column calculate the position
-                    pos_in_column = column.calculate_click_position(click_offset)
-                    if pos_in_column is not None:
-                        new_position = file_offset + pos_in_column
-                        if new_position < self._file_size:
-                            # Switch to clicked column
-                            self._switch_to_column(i)
-                            # Set cursor position
-                            column.cursor.position = new_position
-                            self._on_cursor_position_changed(new_position)
-                return
-
-            current_x += column_width
 
     def render_line(self, y: int) -> Strip:
-        """Render a line using the column system."""
-        # Get scroll offset and adjust y accordingly
-        scroll_x, scroll_y = self.scroll_offset
-        actual_line = y + scroll_y
+        """Render a single line of the hex view."""
+        # The y parameter is in viewport space, need to add scroll offset
+        virtual_y = y + int(self.scroll_y)
 
-        # Handle empty file or out of bounds
-        if not self._file:
-            segment = Segment("No file loaded", None)
-            return Strip([segment])
+        # Get rendered strips from each column
+        rendered_columns = [column.render_line(virtual_y) for column in self._columns]
 
-        if actual_line >= self.virtual_size.height:
-            return Strip.blank(self.size.width)
+        # Combine strips with spaces
+        combined_segments = []
+        for i, strip in enumerate(rendered_columns):
+            for segment in strip:
+                combined_segments.append(segment)
+            if i < len(rendered_columns) - 1:
+                combined_segments.append(Segment(" "))
 
-        # Calculate file offset for this line
-        file_offset = actual_line * BYTES_PER_LINE
-
-        # Check if offset is beyond file size
-        if file_offset >= self._file_size:
-            return Strip.blank(self.size.width)
-
-        # Read data for this line
-        chunk = self._read_chunk(file_offset)
-        if not chunk:
-            return Strip.blank(self.size.width)
-
-        # Render each column
-        all_segments = []
-        for i, column in enumerate(self.columns):
-            if i > 0:
-                # Add space between columns
-                all_segments.append(Segment(" ", None))
-
-            column_segments = column.render_line(chunk, file_offset, actual_line)
-            all_segments.extend(column_segments)
-
-        # Add extra space at end of row
-        all_segments.append(Segment(" ", None))
-
-        # Create and crop strip
-        strip = Strip(all_segments)
-        return strip.crop(0, self.size.width)
-
-    def _read_chunk(self, file_offset: int) -> bytes:
-        """Read a chunk of bytes from the file at the given offset."""
-        try:
-            self._file.seek(file_offset)
-            return self._file.read(BYTES_PER_LINE)
-        except Exception:
-            return b""
+        return Strip(combined_segments)

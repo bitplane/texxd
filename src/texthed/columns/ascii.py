@@ -1,29 +1,36 @@
-"""ASCII column for displaying data in ASCII format."""
+"""ASCII column widget for displaying data in ASCII format."""
 
-from typing import List, Optional
+from typing import Optional, List
+from textual.strip import Strip
 from rich.segment import Segment
 from rich.style import Style
+from textual import events
 
-from .column import DataColumn
+from .column import Column
+from ..cursors import Cursor
 
 
-class AsciiColumn(DataColumn):
-    """Column that displays data in ASCII format."""
+class AsciiColumn(Column):
+    """Widget that displays data in ASCII format."""
 
-    def __init__(self, bytes_per_line: int = 16, cursor=None):
-        super().__init__(cursor=cursor)
-        self.bytes_per_line = bytes_per_line
+    def __init__(self, bytes_per_line: int = 16):
+        super().__init__(bytes_per_line=bytes_per_line)
+        self.can_focus = True
+        self.cursor = Cursor(
+            bytes_per_line=bytes_per_line,
+            parent_column=self,
+        )
 
-    @property
-    def width(self) -> int:
-        """ASCII column width: 1 char per byte."""
+    def get_content_width(self) -> int:
+        """Calculate content width."""
+        # ASCII column: 1 char per byte
         return self.bytes_per_line
 
-    def render_line(self, data: bytes, file_offset: int, line_number: int) -> List[Segment]:
-        """Render the ASCII representation of the data."""
+    def _render_ascii_line_segments(
+        self, data: bytes, file_offset: int, styles: List[Optional[Style]]
+    ) -> List[Segment]:
+        """Helper to render a line of ASCII data into segments."""
         segments = []
-        styles = self._apply_highlighting(data, file_offset)
-
         for i, byte in enumerate(data):
             # Get style for this byte
             style = styles[i] if i < len(styles) else Style()
@@ -34,11 +41,29 @@ class AsciiColumn(DataColumn):
 
         # Pad with spaces if line is shorter than bytes_per_line
         for i in range(len(data), self.bytes_per_line):
-            segments.append(Segment(" ", Style()))
-
+            segments.append(Segment(" "))
         return segments
+
+    def render_line(self, y: int) -> Strip:
+        """Render a line of ASCII data."""
+        # Get data for this line
+        file_offset = int(y) * self.bytes_per_line
+        data = self._get_line_data(file_offset)
+
+        if not data:
+            return Strip.blank(self.get_content_width())
+
+        # Apply highlighting
+        styles = self._apply_highlighting(data, file_offset)
+
+        segments = self._render_ascii_line_segments(data, file_offset, styles)
+        return Strip(segments)
 
     def calculate_click_position(self, click_offset: int) -> Optional[int]:
         """Calculate byte position within ASCII column from click offset."""
         # ASCII column: simple 1 char per byte
         return min(click_offset, self.bytes_per_line - 1)
+
+    def on_key(self, event: events.Key) -> bool:
+        """Handle key events for the column."""
+        return self.cursor.handle_event(event)
