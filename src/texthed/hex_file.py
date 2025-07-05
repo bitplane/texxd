@@ -1,13 +1,13 @@
 """File-like object with memory view and write buffer overlay."""
 
-from io import IOBase
+from io import RawIOBase
 from typing import Dict, Tuple
 
 
-class HexFile:
+class HexFile(RawIOBase):
     """A file-like object that wraps a file with memory view and write buffer."""
 
-    def __init__(self, file: IOBase):
+    def __init__(self, file: RawIOBase):
         self._file = file
         self._write_buffer: Dict[int, bytes] = {}
         self._position = 0
@@ -24,8 +24,6 @@ class HexFile:
     @property
     def size(self) -> int:
         """Get the current size of the file including unsaved changes."""
-        # For now, return original file size
-        # TODO: Account for write buffer extending file
         return self._file_size
 
     def tell(self) -> int:
@@ -44,6 +42,16 @@ class HexFile:
         # Clamp position to valid range (allow seeking beyond end for writes)
         self._position = max(0, self._position)
         return self._position
+
+    def readable(self) -> bool:
+        """Return True if the stream can be read from."""
+        return True
+
+    def readinto(self, b: bytearray) -> int:
+        """Read bytes into a pre-allocated bytearray."""
+        data = self.read(len(b))
+        b[: len(data)] = data
+        return len(data)
 
     def read(self, size: int = -1) -> bytes:
         """Read bytes from current position."""
@@ -96,6 +104,10 @@ class HexFile:
 
         self._position += len(result)
         return bytes(result)
+
+    def writable(self) -> bool:
+        """Return True if the stream can be written to."""
+        return True
 
     def write(self, data: bytes) -> int:
         """Write bytes to buffer at current position."""

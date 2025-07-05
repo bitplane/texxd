@@ -309,3 +309,80 @@ def test_hex_file_close(tmpdir):
         # File should be closed
         with pytest.raises(ValueError):
             f.read()
+
+
+def test_hex_file_readable_writable(tmpdir):
+    """Test readable() and writable() methods."""
+    test_file = tmpdir / "test.bin"
+    test_file.write_bytes(b"ABC")
+
+    with open(test_file, "r+b") as f:
+        hex_file = HexFile(f)
+        assert hex_file.readable() is True
+        assert hex_file.writable() is True
+
+
+def test_hex_file_readinto(tmpdir):
+    """Test readinto() method."""
+    test_file = tmpdir / "test.bin"
+    test_data = b"ABCDEFGHIJ"
+    test_file.write_bytes(test_data)
+
+    with open(test_file, "r+b") as f:
+        hex_file = HexFile(f)
+        buffer = bytearray(5)
+        bytes_read = hex_file.readinto(buffer)
+        assert bytes_read == 5
+        assert buffer == bytearray(b"ABCDE")
+        assert hex_file.tell() == 5
+
+        buffer = bytearray(10)
+        hex_file.seek(0)
+        bytes_read = hex_file.readinto(buffer)
+        assert bytes_read == 10
+        assert buffer == bytearray(b"ABCDEFGHIJ")
+
+
+def test_hex_file_read_actual_read_size_zero(tmpdir):
+    """Test read() method when actual_read_size is zero."""
+    test_file = tmpdir / "test.bin"
+    test_data = b"ABC"
+    test_file.write_bytes(test_data)
+
+    with open(test_file, "r+b") as f:
+        hex_file = HexFile(f)
+        hex_file.seek(len(test_data))
+        assert hex_file.read(1) == b""
+        assert hex_file.read(-1) == b""
+
+
+def test_hex_file_read_no_overlap_write_buffer(tmpdir):
+    """Test read() method when there's no overlap with the write buffer."""
+    test_file = tmpdir / "test.bin"
+    test_data = b"ABCDEFGHIJ"
+    test_file.write_bytes(test_data)
+
+    with open(test_file, "r+b") as f:
+        hex_file = HexFile(f)
+        hex_file.seek(0)
+        hex_file.write(b"XX")  # Write at offset 0
+
+        hex_file.seek(5)
+        assert hex_file.read(2) == b"FG"  # Read at offset 5, no overlap
+
+        hex_file.seek(0)
+        assert hex_file.read(2) == b"XX"  # Read the written data
+
+
+def test_hex_file_save_no_changes(tmpdir):
+    """Test save() method when there are no unsaved changes."""
+    test_file = tmpdir / "test.bin"
+    test_data = b"ABCDEFGHIJ"
+    test_file.write_bytes(test_data)
+
+    with open(test_file, "r+b") as f:
+        hex_file = HexFile(f)
+        assert not hex_file.has_unsaved_changes()
+        hex_file.save()  # Should do nothing, no error
+        assert not hex_file.has_unsaved_changes()
+        assert test_file.read_bytes() == test_data
