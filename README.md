@@ -4,14 +4,15 @@ A hex viewer, soon to be editor for textual.
 
 ## todo
 
-- [ ] add editing (using arranges)
+- [x] add editing (naive)
 - [ ] support drag-select
-- [ ] Support highlighter for byte ranges
-  - [ ] make a CSS highlighter for arbitrary rules
-  - [ ] find can be a highlighter
-  - [ ] unsaved edits as a highlighter
+- [ ] style text
+  - [x] Naive style stack
+  - [ ] Change Highlighter to Styler (use CSS to style rendered text)
+  - [ ] find as CSS classes
+  - [x] unsaved edits as a highlighter
   - [ ] binary diff tool as a highlighter
-  - [ ] view's own highlighter applied last
+  - [x] fix order of styles
 - [ ] Design better cursor nav
   - [ ] vim style normal and edit modes (i, o, a to enter edit, esc = normal)
   - [ ] support editing by default

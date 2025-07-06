@@ -21,7 +21,7 @@ class HexFile(RawIOBase, Highlighter):
         self.unsaved: Dict[int, int] = {}  # pos -> byte value
 
         # Highlight style
-        self.changed_style = Style(bgcolor="yellow", color="black")
+        self.changed_style = Style(color="bright_red")
 
     def _get_file_size(self) -> int:
         """Get the size of the underlying file."""
@@ -155,7 +155,11 @@ class HexFile(RawIOBase, Highlighter):
         # Simple highlighting - just check if position is in unsaved
         for i in range(len(data)):
             if file_offset + i in self.unsaved:
-                styles[i] = self.changed_style
+                # Combine with existing style instead of replacing
+                if styles[i] is None:
+                    styles[i] = self.changed_style
+                else:
+                    styles[i] = styles[i] + self.changed_style
 
     def flush(self) -> None:
         """Flush all changes to the underlying file."""

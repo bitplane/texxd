@@ -56,16 +56,16 @@ class HexView(ScrollView):
         self._setup_data_access()
 
         # Add highlighters to data columns
-        self._hex_column.add_highlighter(NewlineHighlighter())
-        self._ascii_column.add_highlighter(NewlineHighlighter())
+        self._hex_column.add_highlighter("newline", NewlineHighlighter())
+        self._ascii_column.add_highlighter("newline", NewlineHighlighter())
 
         # Set hex view reference for cursor size access
         self._hex_column.cursor.hex_view = self
         self._ascii_column.cursor.hex_view = self
 
-        # Add cursors as highlighters
-        self._hex_column.add_highlighter(self._hex_column.cursor)
-        self._ascii_column.add_highlighter(self._ascii_column.cursor)
+        # Add cursors as highlighters (last to maintain priority)
+        self._hex_column.add_highlighter("cursor", self._hex_column.cursor)
+        self._ascii_column.add_highlighter("cursor", self._ascii_column.cursor)
 
         # Set initial focused column
         self._set_active_column(self._hex_column)
@@ -131,10 +131,10 @@ class HexView(ScrollView):
             # Add spaces between columns
             total_width += len(self._columns) - 1
 
-            # Add file as highlighter if it supports highlighting
+            # Add file as highlighter if it supports highlighting (before cursor due to insertion order)
             if hasattr(file, "highlight"):
-                self._hex_column.add_highlighter(file)
-                self._ascii_column.add_highlighter(file)
+                self._hex_column.add_highlighter("file", file)
+                self._ascii_column.add_highlighter("file", file)
 
             self.virtual_size = Size(total_width, lines_needed)
             self.refresh()

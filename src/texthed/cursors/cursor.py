@@ -99,7 +99,10 @@ class Cursor(Highlighter, Widget):
             cursor_index = self.position - data_start
 
             # Apply cursor style (only when active)
-            styles[cursor_index] = self._combine_styles(styles[cursor_index], self.active_style)
+            if styles[cursor_index] is None:
+                styles[cursor_index] = self.active_style
+            else:
+                styles[cursor_index] = styles[cursor_index] + self.active_style
 
     def _combine_styles(self, existing: Optional[Style], new: Style) -> Style:
         """Combine an existing style with a new style."""
