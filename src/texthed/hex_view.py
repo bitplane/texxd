@@ -43,9 +43,9 @@ class HexView(ScrollView):
 
     def compose(self) -> ComposeResult:
         """Compose the hex view layout."""
-        self._address_column = AddressColumn(bytes_per_line=self.DEFAULT_BYTES_PER_LINE)
-        self._hex_column = HexColumn(bytes_per_line=self.DEFAULT_BYTES_PER_LINE)
-        self._ascii_column = AsciiColumn(bytes_per_line=self.DEFAULT_BYTES_PER_LINE)
+        self._address_column = AddressColumn(bytes_per_line=self.DEFAULT_BYTES_PER_LINE, hex_view=self)
+        self._hex_column = HexColumn(bytes_per_line=self.DEFAULT_BYTES_PER_LINE, hex_view=self)
+        self._ascii_column = AsciiColumn(bytes_per_line=self.DEFAULT_BYTES_PER_LINE, hex_view=self)
         self._columns = [self._address_column, self._hex_column, self._ascii_column]
         # Don't use Horizontal container - we'll handle the layout in render_line
         return []
@@ -130,6 +130,11 @@ class HexView(ScrollView):
 
             # Add spaces between columns
             total_width += len(self._columns) - 1
+
+            # Add file as highlighter if it supports highlighting
+            if hasattr(file, "highlight"):
+                self._hex_column.add_highlighter(file)
+                self._ascii_column.add_highlighter(file)
 
             self.virtual_size = Size(total_width, lines_needed)
             self.refresh()

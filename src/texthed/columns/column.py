@@ -12,11 +12,12 @@ from ..highlighters.highlighter import Highlighter
 class Column(Static):
     """Base class for all columns."""
 
-    def __init__(self, *args, bytes_per_line: int = 16, **kwargs) -> None:
+    def __init__(self, *args, bytes_per_line: int = 16, hex_view=None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.file_size = 0
         self.bytes_per_line = bytes_per_line
         self._highlighters: List[Highlighter] = []
+        self.hex_view = hex_view
 
     def add_highlighter(self, highlighter: Highlighter) -> None:
         """Add a highlighter to this column."""

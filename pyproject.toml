@@ -9,8 +9,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 
 dependencies = [
-    "textual~=3.5",
-    "arranges~=0.1"
+    "textual~=3.5"
 ]
 
 [project.scripts]

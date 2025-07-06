@@ -149,8 +149,8 @@ def test_hex_file_write_at_end(tmpdir):
         assert hex_file.read() == b"ABCDEXYZ"
 
 
-def test_hex_file_save_changes(tmpdir):
-    """Test saving changes to underlying file."""
+def test_hex_file_flush_changes(tmpdir):
+    """Test flushing changes to underlying file."""
     test_file = tmpdir / "test.bin"
     test_data = b"ABCDEFGHIJ"
     test_file.write_bytes(test_data)
@@ -164,8 +164,8 @@ def test_hex_file_save_changes(tmpdir):
         hex_file.seek(7)
         hex_file.write(b"Z")
 
-        # Save changes
-        hex_file.save()
+        # Flush changes
+        hex_file.flush()
 
         # Verify no unsaved changes
         assert not hex_file.has_unsaved_changes()
@@ -374,8 +374,8 @@ def test_hex_file_read_no_overlap_write_buffer(tmpdir):
         assert hex_file.read(2) == b"XX"  # Read the written data
 
 
-def test_hex_file_save_no_changes(tmpdir):
-    """Test save() method when there are no unsaved changes."""
+def test_hex_file_flush_no_changes(tmpdir):
+    """Test flush() method when there are no unsaved changes."""
     test_file = tmpdir / "test.bin"
     test_data = b"ABCDEFGHIJ"
     test_file.write_bytes(test_data)
@@ -383,6 +383,6 @@ def test_hex_file_save_no_changes(tmpdir):
     with open(test_file, "r+b") as f:
         hex_file = HexFile(f)
         assert not hex_file.has_unsaved_changes()
-        hex_file.save()  # Should do nothing, no error
+        hex_file.flush()  # Should do nothing, no error
         assert not hex_file.has_unsaved_changes()
         assert test_file.read_bytes() == test_data

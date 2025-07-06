@@ -1,20 +1,27 @@
 """File-like object with memory view and write buffer overlay."""
 
 from io import RawIOBase
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Optional
+from rich.style import Style
+from .highlighters.highlighter import Highlighter
 from .log import get_logger
 
 logger = get_logger(__name__)
 
 
-class HexFile(RawIOBase):
+class HexFile(RawIOBase, Highlighter):
     """A file-like object that wraps a file with memory view and write buffer."""
 
     def __init__(self, file: RawIOBase):
+        RawIOBase.__init__(self)
+        Highlighter.__init__(self)
         self._file = file
-        self._write_buffer: Dict[int, bytes] = {}
         self._position = 0
         self._file_size = self._get_file_size()
+        self.unsaved: Dict[int, int] = {}  # pos -> byte value
+
+        # Highlight style
+        self.changed_style = Style(bgcolor="yellow", color="black")
 
     def _get_file_size(self) -> int:
         """Get the size of the underlying file."""
@@ -82,28 +89,12 @@ class HexFile(RawIOBase):
         if len(result) < actual_read_size:
             result.extend(b"\x00" * (actual_read_size - len(result)))
 
-        # Apply write buffer overlays
-        for buf_offset, buf_data in self._write_buffer.items():
-            # Check if this buffer entry overlaps with our read range
-            read_start = self._position
-            read_end = self._position + len(result)
-            buf_end = buf_offset + len(buf_data)
-
-            # Skip if no overlap
-            if buf_end <= read_start or buf_offset >= read_end:
-                continue
-
-            # Calculate overlap region
-            overlap_start = max(read_start, buf_offset)
-            overlap_end = min(read_end, buf_end)
-
-            # Apply overlay
-            result_start = overlap_start - read_start
-            result_end = overlap_end - read_start
-            buf_start = overlap_start - buf_offset
-            buf_end_slice = buf_start + (overlap_end - overlap_start)
-
-            result[result_start:result_end] = buf_data[buf_start:buf_end_slice]
+        # Apply unsaved byte overlays
+        read_start = self._position
+        for i in range(len(result)):
+            pos = read_start + i
+            if pos in self.unsaved:
+                result[i] = self.unsaved[pos]
 
         self._position += len(result)
         return bytes(result)
@@ -117,8 +108,10 @@ class HexFile(RawIOBase):
         if not data:
             return 0
 
-        # Store in write buffer
-        self._write_buffer[self._position] = data
+        # Store each byte in unsaved map
+        for i, byte in enumerate(data):
+            self.unsaved[self._position + i] = byte
+
         bytes_written = len(data)
         self._position += bytes_written
 
@@ -130,37 +123,66 @@ class HexFile(RawIOBase):
 
     def has_unsaved_changes(self) -> bool:
         """Check if there are unsaved changes."""
-        return len(self._write_buffer) > 0
+        return len(self.unsaved) > 0
 
     def get_unsaved_ranges(self) -> list[Tuple[int, int]]:
         """Get list of (start, end) tuples for unsaved byte ranges."""
-        ranges = []
-        for offset, data in self._write_buffer.items():
-            ranges.append((offset, offset + len(data)))
-        return sorted(ranges)
+        if not self.unsaved:
+            return []
 
-    def save(self) -> None:
-        """Save all changes to the underlying file."""
-        if not self._write_buffer:
+        # Group consecutive positions into ranges
+        sorted_positions = sorted(self.unsaved.keys())
+        ranges = []
+        start = sorted_positions[0]
+        end = start + 1
+
+        for pos in sorted_positions[1:]:
+            if pos == end:
+                end = pos + 1
+            else:
+                ranges.append((start, end))
+                start = pos
+                end = pos + 1
+
+        ranges.append((start, end))
+        return ranges
+
+    def highlight(self, data: bytes, file_offset: int, styles: List[Optional[Style]]) -> None:
+        """Apply edit highlighting to the styles array."""
+        if not data:
             return
 
-        # Apply all writes to file
+        # Simple highlighting - just check if position is in unsaved
+        for i in range(len(data)):
+            if file_offset + i in self.unsaved:
+                styles[i] = self.changed_style
+
+    def flush(self) -> None:
+        """Flush all changes to the underlying file."""
+        if not self.unsaved:
+            return
+
+        # Save current position
         original_pos = self._file.tell()
 
-        for offset, data in sorted(self._write_buffer.items()):
-            self._file.seek(offset)
-            self._file.write(data)
+        # Write each byte
+        for pos in sorted(self.unsaved.keys()):
+            self._file.seek(pos)
+            self._file.write(bytes([self.unsaved[pos]]))
 
-        # Restore position and clear buffer
+        # Restore position and clear unsaved
         self._file.seek(original_pos)
-        self._write_buffer.clear()
+        self.unsaved.clear()
 
         # Update file size
         self._file_size = self._get_file_size()
 
+        # Flush the underlying file
+        self._file.flush()
+
     def revert(self) -> None:
         """Discard all unsaved changes."""
-        self._write_buffer.clear()
+        self.unsaved.clear()
         self._file_size = self._get_file_size()
 
     def close(self) -> None:

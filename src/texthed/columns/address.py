@@ -9,8 +9,8 @@ from .column import Column
 class AddressColumn(Column):
     """Widget that displays file offset addresses."""
 
-    def __init__(self, bytes_per_line: int = 16):
-        super().__init__(bytes_per_line=bytes_per_line)
+    def __init__(self, bytes_per_line: int = 16, hex_view=None):
+        super().__init__(bytes_per_line=bytes_per_line, hex_view=hex_view)
 
     def get_content_width(self) -> int:
         """Calculate content width based on file size."""

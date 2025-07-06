@@ -7,7 +7,7 @@ from rich.style import Style
 from textual import events
 
 from .column import Column
-from ..cursors import Cursor
+from ..cursors.hex_cursor import HexCursor
 from ..log import get_logger
 
 logger = get_logger(__name__)
@@ -16,10 +16,10 @@ logger = get_logger(__name__)
 class HexColumn(Column):
     """Widget that displays data in hexadecimal format."""
 
-    def __init__(self, bytes_per_line: int = 16):
-        super().__init__(bytes_per_line=bytes_per_line)
+    def __init__(self, bytes_per_line: int = 16, hex_view=None):
+        super().__init__(bytes_per_line=bytes_per_line, hex_view=hex_view)
         self.can_focus = True
-        self.cursor = Cursor(
+        self.cursor = HexCursor(
             bytes_per_line=bytes_per_line,
             parent_column=self,
         )
