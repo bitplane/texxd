@@ -9,7 +9,7 @@ from textual.strip import Strip
 from rich.segment import Segment
 
 from .columns import AddressColumn, HexColumn, AsciiColumn, Column
-from .highlighters import NewlineHighlighter
+from .highlighters.data import DataHighlighter
 from .cursors.cursor import CursorMoved, ScrollRequest
 from .log import get_logger
 
@@ -56,8 +56,8 @@ class HexView(ScrollView):
         self._setup_data_access()
 
         # Add highlighters to data columns
-        self._hex_column.add_highlighter("control_codes", NewlineHighlighter())
-        self._ascii_column.add_highlighter("control_codes", NewlineHighlighter())
+        self._hex_column.add_highlighter("data", DataHighlighter())
+        self._ascii_column.add_highlighter("data", DataHighlighter())
 
         # Set hex view reference for cursor size access
         self._hex_column.cursor.hex_view = self
