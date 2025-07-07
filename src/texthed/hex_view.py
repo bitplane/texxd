@@ -56,8 +56,8 @@ class HexView(ScrollView):
         self._setup_data_access()
 
         # Add highlighters to data columns
-        self._hex_column.add_highlighter("newline", NewlineHighlighter())
-        self._ascii_column.add_highlighter("newline", NewlineHighlighter())
+        self._hex_column.add_highlighter("control_codes", NewlineHighlighter())
+        self._ascii_column.add_highlighter("control_codes", NewlineHighlighter())
 
         # Set hex view reference for cursor size access
         self._hex_column.cursor.hex_view = self

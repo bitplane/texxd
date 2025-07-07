@@ -33,18 +33,19 @@ class AsciiCursor(Cursor):
     def handle_event(self, event: events.Event) -> bool:
         """Handle ASCII editing events."""
         if isinstance(event, events.Key):
-            key = event.key
+            # Use the actual character instead of the key name
+            char = event.character
 
-            # Handle printable ASCII input
-            if len(key) == 1 and 32 <= ord(key) <= 126:
-                self._handle_ascii_input(key)
+            # Handle all printable ASCII input (space through tilde)
+            if char and len(char) == 1 and 32 <= ord(char) <= 126:
+                self._handle_ascii_input(char)
                 return True
 
-            # Handle delete/backspace
-            elif key == "delete":
+            # Handle delete/backspace by key name
+            elif event.key == "delete":
                 self._delete_byte()
                 return True
-            elif key == "backspace":
+            elif event.key == "backspace":
                 self._backspace()
                 return True
 
