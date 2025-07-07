@@ -2,7 +2,7 @@
 
 import pytest
 
-from texthed.hex_file import HexFile
+from texxd.hex_file import HexFile
 
 
 @pytest.fixture

@@ -1,6 +1,6 @@
 [project]
-name = "texthed"
-description = "texthed"
+name = "texxd"
+description = "A hex editor built with Textual"
 version = "0.0.1"
 authors = [
     { name = "Gareth Davidson", email = "gaz@bitplane.net" }
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-texthed = "texthed.app:main"
+texxd = "texxd.app:main"
 
 [project.optional-dependencies]
 dev = [

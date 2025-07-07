@@ -3,8 +3,8 @@
 from rich.segment import Segment, Style
 from typing import Optional
 
-from texthed.columns.hex import HexColumn
-from texthed.columns.ascii import AsciiColumn
+from texxd.columns.hex import HexColumn
+from texxd.columns.ascii import AsciiColumn
 
 
 class MockHexColumn(HexColumn):

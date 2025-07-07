@@ -1,5 +1,3 @@
-"""Logging setup for TextHed."""
-
 import logging
 import sys
 from pathlib import Path

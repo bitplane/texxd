@@ -1,4 +1,4 @@
-"""Hex editor widget for TextHed."""
+"""Hex editor widget."""
 
 from pathlib import Path
 from typing import Optional

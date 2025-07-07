@@ -3,7 +3,7 @@
 		pre-commit update-pre-commit
 
 
-PROJECT_NAME := texthed
+PROJECT_NAME := texxd
 
 
 all: dev coverage  ## builds everything
@@ -18,7 +18,8 @@ test: .venv/.installed-dev  ## run the project's tests
 coverage: .venv/.installed-dev scripts/coverage.sh  ## build the html coverage report
 	scripts/coverage.sh $(PROJECT_NAME)
 
-docs: .docs/index.html ## build the documentation
+docs: scripts/docs.sh docs/index.md ## build the documentation
+	scripts/docs.sh
 
 clean:  ## delete caches and the venv
 	scripts/clean.sh
@@ -28,7 +29,7 @@ pre-commit: .git/hooks/pre-commit  ## install pre-commit into the git repo
 update-pre-commit: scripts/update-pre-commit.sh  ## autoupdate pre-commit
 	scripts/update-pre-commit.sh
 
-dist: scripts/dist.sh ## build the distributable files
+dist: pyproject.toml scripts/dist.sh ## build the distributable files
 	scripts/dist.sh $(PROJECT_NAME)
 
 release: scripts/release.sh ## publish to pypi

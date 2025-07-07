@@ -1,4 +1,4 @@
-"""Main application for TextHed hex editor."""
+"""Main application for texxd hex editor."""
 
 import argparse
 from pathlib import Path
@@ -12,10 +12,10 @@ from .hex_view import HexView
 from .log import setup_logging
 
 
-class TexthedApp(App):
+class TexxdApp(App):
     """A hex editor application built with Textual."""
 
-    TITLE = "TextHed"
+    TITLE = "texxd"
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
         ("ctrl+s", "save", "Save"),
@@ -61,7 +61,7 @@ class TexthedApp(App):
 
 def main() -> None:
     """Main entry point for the application."""
-    parser = argparse.ArgumentParser(description="TextHed - A hex editor built with Textual")
+    parser = argparse.ArgumentParser(description="texxd - A hex editor built with Textual")
     parser.add_argument("file", nargs="?", help="File to open")
     parser.add_argument(
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Set logging level"
@@ -75,7 +75,7 @@ def main() -> None:
 
     # Create and run app
     file_path = Path(args.file) if args.file else None
-    app = TexthedApp(file_path)
+    app = TexxdApp(file_path)
     app.run()
 
 

@@ -1,6 +1,6 @@
-# texthed
+# texxd
 
-A hex viewer, soon to be editor for textual.
+A hex editor built with Textual.
 
 ## todo
 
