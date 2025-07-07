@@ -15,5 +15,5 @@ A hex viewer, soon to be editor for textual.
   - [x] fix order of styles
 - [ ] Design better cursor nav
   - [ ] vim style normal and edit modes (i, o, a to enter edit, esc = normal)
-  - [ ] support editing by default
+  - [x] support editing by default
 

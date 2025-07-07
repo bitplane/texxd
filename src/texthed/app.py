@@ -18,6 +18,7 @@ class TexthedApp(App):
     TITLE = "TextHed"
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
+        ("ctrl+s", "save", "Save"),
     ]
 
     def __init__(self, file_path: Optional[Path] = None):
@@ -41,6 +42,21 @@ class TexthedApp(App):
     def action_quit(self) -> None:
         """Quit the application."""
         self.exit()
+
+    def action_save(self) -> None:
+        """Save the current file."""
+        try:
+            hex_editor = self.query_one(HexEditor)
+            if hex_editor._file_handle:
+                hex_editor._file_handle.flush()
+                # Refresh the hex view to clear edit highlighting
+                hex_view = self.query_one(HexView)
+                hex_view.refresh()
+                self.notify("File saved!")
+            else:
+                self.notify("No file open", severity="warning")
+        except Exception as e:
+            self.notify(f"Save failed: {e}", severity="error")
 
 
 def main() -> None:
