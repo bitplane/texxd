@@ -10,6 +10,7 @@ from textual.widgets import Header, Footer
 from .hex_editor import HexEditor
 from .hex_view import HexView
 from .log import setup_logging
+from . import __version__
 
 
 class TexxdApp(App):
@@ -63,6 +64,9 @@ def main() -> None:
     """Main entry point for the application."""
     parser = argparse.ArgumentParser(description="texxd - A hex editor built with Textual")
     parser.add_argument("file", nargs="?", help="File to open")
+    parser.add_argument(
+        "--version", "-v", action="version", version=f"texxd {__version__}", help="Show version and exit"
+    )
     parser.add_argument(
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Set logging level"
     )
