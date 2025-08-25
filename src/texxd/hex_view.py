@@ -6,6 +6,9 @@ from textual.reactive import reactive
 from textual.geometry import Size
 from textual import events
 from textual.strip import Strip
+from textual.containers import Container
+from textual.widgets import Input, Label, Button
+from textual.screen import ModalScreen
 from rich.segment import Segment
 
 from .columns import AddressColumn, HexColumn, AsciiColumn, Column
@@ -14,6 +17,85 @@ from .cursors.cursor import CursorMoved, ScrollRequest
 from .log import get_logger
 
 logger = get_logger(__name__)
+
+
+class GoToOffsetModal(ModalScreen):
+    """Modal dialog for jumping to a specific offset."""
+
+    CSS = """
+    GoToOffsetModal {
+        align: center middle;
+    }
+
+    GoToOffsetModal > Container {
+        width: 40;
+        height: 9;
+        border: solid $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    GoToOffsetModal Label {
+        margin-bottom: 1;
+    }
+
+    GoToOffsetModal Input {
+        margin-bottom: 1;
+    }
+
+    GoToOffsetModal Button {
+        width: 100%;
+    }
+    """
+
+    def __init__(self, max_offset: int):
+        super().__init__()
+        self.max_offset = max_offset
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Label("Go to offset (hex: 0x1234 or decimal: 1234):")
+            yield Input(placeholder="Enter offset", id="offset-input")
+            yield Button("Go", variant="primary", id="go-button")
+            yield Button("Cancel", id="cancel-button")
+
+    def on_mount(self) -> None:
+        """Focus the input when mounted."""
+        self.query_one("#offset-input", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses."""
+        if event.button.id == "cancel-button":
+            self.dismiss(None)
+        elif event.button.id == "go-button":
+            self._submit_offset()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle Enter key in input."""
+        self._submit_offset()
+
+    def _submit_offset(self) -> None:
+        """Parse and submit the offset."""
+        input_widget = self.query_one("#offset-input", Input)
+        value = input_widget.value.strip()
+
+        if not value:
+            self.dismiss(None)
+            return
+
+        try:
+            # Parse hex or decimal
+            if value.startswith("0x") or value.startswith("0X"):
+                offset = int(value, 16)
+            else:
+                offset = int(value)
+
+            # Clamp to valid range
+            offset = max(0, min(offset, self.max_offset))
+            self.dismiss(offset)
+        except ValueError:
+            input_widget.value = ""
+            input_widget.placeholder = "Invalid number"
 
 
 class HexView(ScrollView):
@@ -82,6 +164,14 @@ class HexView(ScrollView):
         # Inject data access method into all columns
         for column in self._columns:
             column._get_line_data = get_line_data
+
+    def watch_cursor_position(self, position: int) -> None:
+        """Update app subtitle with cursor position."""
+        if self.app and self.file_size > 0:
+            hex_offset = f"0x{position:08X}"
+            dec_offset = f"{position}"
+            percent = f"{(position * 100 // self.file_size):3d}%" if self.file_size > 0 else "0%"
+            self.app.sub_title = f"Offset: {hex_offset} ({dec_offset}) | {percent}"
 
     def _set_active_column(self, column) -> None:
         """Set the active/focused column."""
@@ -212,6 +302,20 @@ class HexView(ScrollView):
             new_scroll = min(max(0, new_scroll), max_scroll)
             self.scroll_to(y=new_scroll, animate=False)
 
+    def _show_goto_offset_dialog(self) -> None:
+        """Show the go-to-offset dialog."""
+
+        def handle_result(offset: int | None) -> None:
+            """Handle the result from the dialog."""
+            if offset is not None and self._focused_column and hasattr(self._focused_column, "cursor"):
+                self._focused_column.cursor.go_to_offset(offset)
+                self._handle_cursor_move(offset)
+                self.refresh()
+
+        # Push the modal screen
+        modal = GoToOffsetModal(self.file_size - 1 if self.file_size > 0 else 0)
+        self.app.push_screen(modal, handle_result)
+
     def on_key(self, event: events.Key) -> None:
         """Handle key events."""
         logger.debug(f"HexView received key: {event.key}, focused: {self.has_focus}")
@@ -235,6 +339,11 @@ class HexView(ScrollView):
             handled = self._tab(back=event.key == "shift+tab")
             if handled:
                 self.refresh()
+
+        # Ctrl+G for go-to-offset
+        if not handled and event.key == "ctrl+g":
+            self._show_goto_offset_dialog()
+            handled = True
 
         # Prevent default key handling only if the event was handled
         if handled:

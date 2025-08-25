@@ -147,13 +147,21 @@ class Cursor(Highlighter, Widget):
         elif key == "down":
             self.move_y(1)
         elif key == "home" or key == "\x01":  # Home or Ctrl+A
-            self.set_x(0)
+            self.move_to_line_start()
         elif key == "end" or key == "\x04":  # End or Ctrl+D
-            self.set_x(self.bytes_per_line - 1)
+            self.move_to_line_end()
         elif key == "ctrl+home":
-            self._move_to_file_start()
+            self.move_to_file_start()
         elif key == "ctrl+end":
-            self._move_to_file_end()
+            self.move_to_file_end()
+        elif key == "ctrl+left":
+            self.move_word_backward()
+        elif key == "ctrl+right":
+            self.move_word_forward()
+        elif key == "ctrl+u":
+            self.move_half_page_up()
+        elif key == "ctrl+d":
+            self.move_half_page_down()
         elif key == "pageup":
             self.move_y(-self.view_height)
         elif key == "pagedown":
@@ -239,6 +247,60 @@ class Cursor(Highlighter, Widget):
         file_size = self.file_size
         if file_size > 0:
             self._set_position(file_size - 1)
+
+    def move_to_line_start(self) -> None:
+        """Move cursor to the beginning of the current line."""
+        self.set_x(0)
+
+    def move_to_line_end(self) -> None:
+        """Move cursor to the end of the current line."""
+        self.set_x(self.bytes_per_line - 1)
+
+    def move_to_file_start(self) -> None:
+        """Move cursor to the beginning of the file."""
+        self._set_position(0)
+
+    def move_to_file_end(self) -> None:
+        """Move cursor to the end of the file."""
+        if self.file_size > 0:
+            self._set_position(self.file_size - 1)
+
+    def move_word_forward(self, word_size: int = 4) -> None:
+        """Move cursor forward by word_size bytes.
+
+        Args:
+            word_size: Number of bytes to jump (default 4 for DWORD)
+        """
+        new_position = min(self.position + word_size, self.file_size - 1)
+        self._set_position(new_position)
+
+    def move_word_backward(self, word_size: int = 4) -> None:
+        """Move cursor backward by word_size bytes.
+
+        Args:
+            word_size: Number of bytes to jump (default 4 for DWORD)
+        """
+        new_position = max(self.position - word_size, 0)
+        self._set_position(new_position)
+
+    def move_half_page_up(self) -> None:
+        """Move cursor up by half the view height."""
+        half_height = max(1, self.view_height // 2)
+        self.move_y(-half_height)
+
+    def move_half_page_down(self) -> None:
+        """Move cursor down by half the view height."""
+        half_height = max(1, self.view_height // 2)
+        self.move_y(half_height)
+
+    def go_to_offset(self, offset: int) -> None:
+        """Jump directly to a specific file offset.
+
+        Args:
+            offset: The byte offset to jump to
+        """
+        offset = max(0, min(offset, self.file_size - 1))
+        self._set_position(offset)
 
     def _set_position(self, new_position: int) -> None:
         """Set cursor position and notify callbacks."""

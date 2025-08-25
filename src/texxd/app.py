@@ -20,6 +20,7 @@ class TexxdApp(App):
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
         ("ctrl+s", "save", "Save"),
+        ("ctrl+g", "goto", "Go to offset"),
     ]
 
     def __init__(self, file_path: Optional[Path] = None):
