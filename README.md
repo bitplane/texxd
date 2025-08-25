@@ -32,6 +32,3 @@ Do wtf you want with it, but you're on your own.
   - [ ] Change Highlighter to Styler (use CSS to style rendered text)
   - [ ] find as CSS classes
   - [ ] binary diff tool as a highlighter
-- [ ] Design better cursor navigation
-  - [ ] vim style normal and edit modes (i, o, a to enter edit, esc = normal)
-  - [x] support editing by default
