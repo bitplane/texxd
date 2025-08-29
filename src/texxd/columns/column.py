@@ -32,23 +32,19 @@ class Column(Static):
 
     def _get_line_data(self, file_offset: int) -> bytes:
         """Get data for a specific line."""
-        raise NotImplementedError
+        raise NotImplementedError()
 
     def get_content_width(self) -> int:
         """Get the width of the column's content."""
-        raise NotImplementedError
+        raise NotImplementedError()
 
     def render_line(self, y: int) -> Strip:
         """Render a single line of the column."""
-        raise NotImplementedError
+        raise NotImplementedError()
 
     def on_key(self, event: events.Key) -> bool:
         """Handle key events for the column.
 
-        Args:
-            event: The key event.
-
-        Returns:
-            True if the event was handled, False otherwise.
+        Returns True if the event was handled, False otherwise.
         """
         return False
