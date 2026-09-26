@@ -1,5 +1,4 @@
 import logging
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -25,12 +24,10 @@ def setup_logging(log_level: str = "INFO", log_file: Optional[Path] = None) -> N
         file_handler.setFormatter(file_formatter)
         handlers.append(file_handler)
     else:
-        # Console handler (stderr to avoid interfering with TUI)
-        console_handler = logging.StreamHandler(sys.stderr)
-        console_handler.setLevel(numeric_level)
-        console_formatter = logging.Formatter("%(name)s - %(levelname)s - %(message)s")
-        console_handler.setFormatter(console_formatter)
-        handlers.append(console_handler)
+        # writing to stderr would draw over the TUI, so send it to the textual devtools console
+        from textual.logging import TextualHandler
+
+        handlers.append(TextualHandler())
 
     # Configure root logger
     logging.basicConfig(level=numeric_level, handlers=handlers, force=True)
