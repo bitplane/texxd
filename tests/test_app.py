@@ -6,7 +6,7 @@ import pytest
 from conftest import Reversed
 
 from texxd.app import TexxdApp
-from texxd.dialogs import ConfirmModal
+from texxd.dialogs import ChoiceModal, ConfirmModal
 from texxd.formats import Binary
 from texxd.view import HexView
 from texxd.view.columns import StructureColumn
@@ -212,7 +212,8 @@ async def test_drill_into_nested_tar_and_edit(nested_tar):
         await pilot.pause()
         assert [level.node.name for level in view.levels] == ["outer.tar", "inner.tar", "data.json"]
         assert view.data.read(0, 9) == b'{"a": 1}\n'
-        assert not any(isinstance(c, StructureColumn) for c in view.level.columns)
+        # it's text, so that's what it can be opened as
+        assert [c.title for c in view.level.columns if isinstance(c, StructureColumn)] == ["text"]
 
         await pilot.press("tab", "X")
         await pilot.press("delete")  # resizes it, and both tars are fixed up
@@ -388,3 +389,67 @@ async def test_derived_edits_undo_and_save(tmp_path, monkeypatch):
         await pilot.pause()
         assert path.read_bytes() == b"REV" + b"olleJ"
         assert not app.document.modified
+
+
+async def test_stale_bytes_are_dimmed_and_ask_before_editing(tmp_path, monkeypatch):
+    monkeypatch.setattr("texxd.formats.registry", lambda: [Reversed, Binary])
+    path = tmp_path / "rev.bin"
+    path.write_bytes(b"REV" + b"olleh")
+    app = TexxdApp(path)
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        view = hex_view(app)
+        await pilot.press("tab", "tab", "enter")
+        await pilot.pause()
+        await pilot.press("tab", "J")
+        await pilot.press("shift+tab", "shift+tab")
+        await pilot.pause()
+        assert view.active == (0, 3)
+        styles = [None] * 8
+        view.highlights.highlight(view.data.read(0, 8), 0, styles)
+        assert [bool(s and s.dim) for s in styles] == [False] * 3 + [True] * 5
+        # typing over them asks first; committing writes the edit back, and the typing is dropped
+        view.set_active(0, 1, 4)
+        await pilot.press("0")
+        await pilot.pause()
+        assert isinstance(app.screen, ChoiceModal)
+        await pilot.press("c")
+        await pilot.pause()
+        assert not isinstance(app.screen, ChoiceModal)
+        assert app.buffer.read(0, 8) == b"REVolleJ" and not app.document.stale()
+        await pilot.press("0", "0")
+        await pilot.pause()
+        assert app.buffer.read(4, 1) == b"\0" and view.levels[1].node.data.read(0, 5) == b"Jel\0o"
+
+
+async def test_text_editing(tmp_path):
+    path = tmp_path / "notes.txt"
+    path.write_bytes("one\ntwo\n日本\n".encode())
+    app = TexxdApp(path)
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        view = hex_view(app)
+        await pilot.press("tab", "tab", "enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert view.node.fmt.contents == "text" and view.insert_mode
+        # rows are lines now, and the hex level shows each line's bytes
+        assert "2  two" in view.render_line(2).text
+        view.scroll_to(x=0, animate=False, immediate=True)
+        await pilot.pause()
+        assert view.render_line(2).text.startswith("0004: 74 77 6f 0a")
+        # typing inserts characters, the arrows move by them, backspace removes a whole one
+        await pilot.press("down", "down", "end", "left")
+        assert view.cursor.position == 11
+        await pilot.press("x", "enter", "y")
+        await pilot.pause()
+        assert view.data.read(0, 30) == "one\ntwo\n日x\ny本\n".encode()
+        await pilot.press("backspace", "backspace", "backspace")
+        await pilot.pause()
+        assert view.data.read(0, 30) == "one\ntwo\n日本\n".encode()
+        await pilot.press("backspace")  # all three bytes of it
+        await pilot.pause()
+        assert view.data.read(0, 30) == "one\ntwo\n本\n".encode()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert path.read_bytes() == "one\ntwo\n本\n".encode()

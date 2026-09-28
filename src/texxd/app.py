@@ -11,7 +11,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Footer, Static
 
 from . import __version__
-from .data import Buffer, Change, ResizeError
+from .data import Buffer, Change, EditError
 from .dialogs import ConfirmModal
 from .document import Document
 from .log import setup_logging
@@ -85,7 +85,7 @@ class TexxdApp(App):
             return
         try:
             self.document.save()
-        except (OSError, ResizeError, NotImplementedError) as e:
+        except (OSError, EditError, NotImplementedError) as e:
             self.notify(f"Save failed: {e}", severity="error")
             return
         self.notify(f"Saved {self.document.path}")

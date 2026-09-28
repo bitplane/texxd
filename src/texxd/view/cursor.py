@@ -1,8 +1,12 @@
 """Cursor position and movement for the hex view."""
 
+from typing import Optional
+
+from .rows import ByteRows, Rows
+
 
 class Cursor:
-    """A byte position in a grid of ``bytes_per_line`` columns.
+    """A byte position, moving through rows of ``bytes_per_line`` bytes, or whatever ``rows`` says.
 
     ``limit`` is the highest position the cursor may reach. For data that can
     grow that's the size itself (one past the last byte, for appending);
@@ -10,6 +14,9 @@ class Cursor:
 
     ``nibble`` is 1 when the high half of a hex byte has been typed and the
     low half is next. Any movement resets it.
+
+    Moving up and down keeps to the column it started in, as far as the rows
+    it passes through allow.
     """
 
     def __init__(self, bytes_per_line: int = 16):
@@ -17,16 +24,23 @@ class Cursor:
         self.nibble = 0
         self.bytes_per_line = bytes_per_line
         self.limit = 0
+        # set for layouts other than fixed rows of bytes
+        self.layout: Optional[Rows] = None
+        self._goal: Optional[int] = None
+
+    @property
+    def rows(self) -> Rows:
+        return self.layout or ByteRows(self.bytes_per_line, self.limit)
 
     @property
     def x(self) -> int:
-        """Column within the line."""
-        return self.position % self.bytes_per_line
+        """Where across its row the cursor is."""
+        return self.rows.x_of(self.position)
 
     @property
     def y(self) -> int:
-        """Line number."""
-        return self.position // self.bytes_per_line
+        """Row number."""
+        return self.rows.row_of(self.position)
 
     def set_position(self, position: int) -> bool:
         """Move to ``position``, clamped to the valid range. Returns True if it moved."""
@@ -34,29 +48,31 @@ class Cursor:
         moved = position != self.position
         self.position = position
         self.nibble = 0
+        self._goal = None
         return moved
 
     def move(self, delta: int) -> bool:
-        """Move by ``delta`` bytes, wrapping across lines."""
-        return self.set_position(self.position + delta)
+        """Move by ``delta`` steps (bytes, or characters), wrapping across rows."""
+        rows = self.rows
+        position = self.position
+        for _ in range(abs(delta)):
+            position = rows.step(position, 1 if delta > 0 else -1)
+        return self.set_position(position)
 
     def move_lines(self, delta: int) -> bool:
-        """Move by ``delta`` lines, keeping the column if that line reaches it."""
-        target = self.position + delta * self.bytes_per_line
-        if target < 0:
-            target = self.x
-        elif target > self.limit:
-            last_line = self.limit // self.bytes_per_line
-            target = min(last_line * self.bytes_per_line + self.x, self.limit)
-            if target // self.bytes_per_line == self.y and delta > 0:
-                target = self.position
-        return self.set_position(target)
+        """Move by ``delta`` rows, keeping to the same column where the rows are long enough."""
+        rows = self.rows
+        goal = self.x if self._goal is None else self._goal
+        row = max(0, min(self.y + delta, rows.count - 1))
+        moved = self.set_position(rows.position_at(row, goal))
+        self._goal = goal
+        return moved
 
     def line_start(self) -> bool:
-        return self.set_position(self.y * self.bytes_per_line)
+        return self.set_position(self.rows.start(self.y))
 
     def line_end(self) -> bool:
-        return self.set_position(self.y * self.bytes_per_line + self.bytes_per_line - 1)
+        return self.set_position(self.rows.end_of(self.y))
 
     def file_start(self) -> bool:
         return self.set_position(0)

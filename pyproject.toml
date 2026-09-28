@@ -18,7 +18,8 @@ classifiers = [
 
 dependencies = [
     "textual>=3.5",
-    "arranges>=0.2"
+    "arranges>=0.2",
+    "chardet>=5"
 ]
 
 [project.urls]

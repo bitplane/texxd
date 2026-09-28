@@ -17,6 +17,7 @@ from .highlight import ACTIVE_STYLE, INACTIVE_STYLE, Styles, combine
 
 if TYPE_CHECKING:
     from ..node import Node
+    from .rows import Rows
     from .view import HexView
 
 HEX_DIGITS = "0123456789abcdef"
@@ -41,11 +42,22 @@ class Column:
     focusable = False
     # it shows bytes, and draws the cursor on the byte it's on
     byte_cursor = False
+    # typing should insert rather than overwrite, where the data can grow
+    prefers_insert = False
+    # it can be as wide as there's room for: see fit()
+    flexible = False
     title = ""
 
     def width(self, bytes_per_line: int, size: int) -> int:
         """Width in cells."""
         raise NotImplementedError()
+
+    def fit(self, width: int) -> None:
+        """For flexible columns: there are ``width`` cells to fill."""
+
+    def rows(self, bytes_per_line: int, limit: int) -> Optional["Rows"]:
+        """How to split the level into rows while it has the cursor, if not in rows of bytes."""
+        return None
 
     def render(
         self,
@@ -68,8 +80,8 @@ class Column:
         """The byte index within the line for a click at ``x`` cells into the column."""
         return 0
 
-    def click(self, line: int, x: int, bytes_per_line: int, size: int) -> Optional[int]:
-        """Where a click ``x`` cells in, on the line starting at offset ``line``, puts the cursor.
+    def click(self, line: int, stop: int, x: int, bytes_per_line: int, size: int) -> Optional[int]:
+        """Where a click ``x`` cells in, on the row of bytes from ``line`` to ``stop``, puts the cursor.
 
         Returns an offset in the level, or None to ignore the click.
         """
@@ -259,7 +271,7 @@ class StructureColumn(Column):
         marker = "└" if region.stop <= end else "│"
         return [Segment(marker, style), Segment(" " * (width - 1))]
 
-    def click(self, line: int, x: int, bytes_per_line: int, size: int) -> Optional[int]:
+    def click(self, line: int, stop: int, x: int, bytes_per_line: int, size: int) -> Optional[int]:
         # stay on the clicked line so the view doesn't jump, but inside the region
         region = self.region_for_line(line, bytes_per_line)
         if region is None:

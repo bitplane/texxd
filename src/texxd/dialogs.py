@@ -4,7 +4,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label
+from textual.widgets import Button, Input, Label, OptionList
 
 DIALOG_CSS = """
 {name} {{
@@ -88,6 +88,69 @@ class GoToOffsetModal(ModalScreen[int | None]):
             field.placeholder = "not a number"
             return
         self.dismiss(max(0, min(offset, self.max_offset)))
+
+
+class ChoiceModal(ModalScreen[str | None]):
+    """Ask a question with several answers, each a (id, label, key). Escape answers None."""
+
+    DEFAULT_CSS = DIALOG_CSS.format(name="ChoiceModal") + "ChoiceModal > Container { width: 64; }"
+    BINDINGS = [Binding("escape", "choose('')", "Cancel")]
+
+    def __init__(self, question: str, choices: list[tuple[str, str, str]]):
+        super().__init__()
+        self.question = question
+        self.choices = choices
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Label(self.question)
+            with Horizontal():
+                for index, (id, label, key) in enumerate(self.choices):
+                    key = "esc" if key == "escape" else key
+                    yield Button(f"{label} ({key})", id=id, variant="primary" if index == 0 else "default")
+
+    def on_mount(self) -> None:
+        self.query(Button).first().focus()
+
+    def on_key(self, event) -> None:
+        for id, _, key in self.choices:
+            if event.key == key:
+                event.stop()
+                self.dismiss(id)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id)
+
+    def action_choose(self, id: str) -> None:
+        self.dismiss(id or None)
+
+
+class EncodingModal(ModalScreen[str | None]):
+    """Pick a character encoding."""
+
+    DEFAULT_CSS = DIALOG_CSS.format(name="EncodingModal") + "EncodingModal OptionList { height: 12; }"
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, current: str | None, encodings: list[str]):
+        super().__init__()
+        self.current = current
+        self.encodings = encodings
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Label(f"Read as (now {self.current}):")
+            yield OptionList(*self.encodings)
+
+    def on_mount(self) -> None:
+        options = self.query_one(OptionList)
+        options.highlighted = self.encodings.index(self.current) if self.current in self.encodings else 0
+        options.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(self.encodings[event.option_index])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class ConfirmModal(ModalScreen[bool]):

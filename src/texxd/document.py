@@ -47,6 +47,10 @@ class Document:
         """True if anything in the document has unsaved changes."""
         return any(node.data.modified for node in self._buffered())
 
+    def stale(self) -> list[Node]:
+        """Derived data with edits that haven't been written back into its parent."""
+        return [node for node in self.root.walk() if node.stale]
+
     def _buffered(self) -> list[Node]:
         """Nodes holding their own buffer: the root, and any derived data."""
         return [node for node in self.root.walk() if node.data is node.buffer]

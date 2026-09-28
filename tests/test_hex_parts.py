@@ -51,8 +51,8 @@ def test_cursor_lines():
     c.set_position(12)
     c.move_lines(2)  # line 2 is too short to reach column 12
     assert c.position == 40
-    c.move_lines(-10)
-    assert c.position == 8
+    c.move_lines(-10)  # back to the column it started in
+    assert c.position == 12
 
 
 def test_cursor_line_and_file_ends():

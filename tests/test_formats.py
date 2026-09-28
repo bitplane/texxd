@@ -17,7 +17,7 @@ def node_for(data: bytes) -> Node:
 
 
 def test_binary_is_always_last():
-    assert detect(Buffer(BytesSource(b"hello"))) == [Binary]
+    assert detect(Buffer(BytesSource(b"\x00\x01\x02"))) == [Binary]
     assert detect(Buffer()) == [Binary]
 
 

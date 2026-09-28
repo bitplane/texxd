@@ -12,6 +12,14 @@ from .log import get_logger
 logger = get_logger(__name__)
 
 
+class StaleError(Exception):
+    """Raised for an edit to encoded bytes whose decoded data has edits that haven't been committed."""
+
+    def __init__(self, node: "Node"):
+        super().__init__(f"{node.name} has edits that aren't in {node.parent.name} yet")
+        self.node = node
+
+
 class Node:
     """A named piece of data in the tree, like a file or a file inside an archive.
 
@@ -24,7 +32,9 @@ class Node:
     node, its format fixes up the parent to match.
 
     Edits to derived data stay in its own buffer until they're committed:
-    encoded by the format and written back over the span.
+    encoded by the format and written back over the span. Until then the
+    span's bytes are stale, and editing them any other way is refused. When
+    they change while the derived data has no edits, it's decoded again.
     """
 
     def __init__(
@@ -44,6 +54,8 @@ class Node:
         self._formats: Optional[list[type[Format]]] = None
         self._regions: dict[type[Format], list[Region]] = {}
         self._children: list["Node"] = []
+        # counts changes to the data, for things that cache what they worked out from it
+        self.version = 0
         data.subscribe(self._on_change)
         # where the contents are in the parent: the data itself if its bytes are there
         self.span: Optional[Data] = None
@@ -52,6 +64,7 @@ class Node:
                 self.span = data
             else:
                 self.span = Window(parent.data, region.data_start, region.data_size)
+                self.span.root.guards.append(self._guard)
             self.span.subscribe(self._on_span_change)
 
     @classmethod
@@ -68,6 +81,11 @@ class Node:
     def derived(self) -> bool:
         """True if this node's data is decoded from its parent's, rather than being its bytes."""
         return self.span is not None and self.span is not self.data
+
+    @property
+    def stale(self) -> bool:
+        """True if this is derived data with edits that haven't been written back to its span."""
+        return self.derived and self.valid and self.data.modified
 
     @property
     def region(self) -> Optional[Region]:
@@ -116,7 +134,10 @@ class Node:
     def formats(self) -> list[type[Format]]:
         """What this data could be, most likely first."""
         if self._formats is None:
-            self._formats = detect(self.data)
+            formats = detect(self.data)
+            if self.fmt is not None:
+                formats = [fmt for fmt in formats if fmt.nests or fmt.name != self.fmt.name]
+            self._formats = formats
         return self._formats
 
     def regions(self, fmt: Optional[type[Format]] = None) -> list[Region]:
@@ -153,6 +174,7 @@ class Node:
 
     def child(self, fmt: type[Format], region: Region) -> "Node":
         """Open a region as a child node. The same region gives the same node."""
+        fmt = fmt.for_region(region)
         self._children = [node for node in self._children if node.valid]
         for node in self._children:
             current = node.region
@@ -164,15 +186,47 @@ class Node:
 
     def _on_change(self, change: Change) -> None:
         # contents changed, so the detected format and structure may have too
+        self.version += 1
         self._formats = None
         self._regions.clear()
 
     def _on_span_change(self, change: Change) -> None:
-        # edits made through this node keep its container consistent; raw edits to
-        # the container's bytes are left as they are
-        if change.delta and change.made_through(self.span):
-            # innermost first, so each container sees its contents' final size
-            self.buffer.defer(("fixup", id(self)), len(self.path), self._fixup)
+        if change.made_through(self.span):
+            # edits made through this node keep its container consistent; raw edits to
+            # the container's bytes are left as they are
+            if change.delta:
+                # innermost first, so each container sees its contents' final size
+                self.buffer.defer(("fixup", id(self)), len(self.path), self._fixup)
+        elif self.derived:
+            self._redecode()
+
+    def _guard(self, change: Change) -> None:
+        """Refuse edits to the span's bytes, other than through it, while they're stale."""
+        if not self.stale or change.made_through(self.span):
+            return
+        start = self.span.to_buffer(0)
+        stop = start + self.span.size
+        lo, hi = change.offset, change.offset + change.removed
+        if (lo < stop and hi > start) or start < lo < stop:
+            raise StaleError(self)
+
+    def _decode(self) -> Buffer:
+        return self.fmt.open(self.parent.data, self.region)
+
+    def _redecode(self) -> None:
+        """The encoded bytes changed some other way: decode them again."""
+        if not self.valid:
+            return
+        if self.data.modified:
+            logger.warning(f"{self.name} changed underneath uncommitted edits")
+            return
+        try:
+            fresh = self._decode()
+        except Exception as e:
+            logger.warning(f"{self.name} can't be decoded any more: {e}")
+            self.data.valid = False
+            return
+        self.data.replace(fresh.source, record=False)
 
     def _fixup(self) -> None:
         if not self.valid:
@@ -183,6 +237,15 @@ class Node:
             raise ResizeError(f"lost track of {self.name} in {self.parent.name}")
         if self.span.size != region.data_size:
             self._region = self.fmt.fixup(self.parent.data, region, self.span.size)
+
+    def discard(self) -> None:
+        """Throw away derived data's uncommitted edits, decoding it again. Undo brings them back."""
+        if not self.stale:
+            return
+        fresh = self._decode()
+        with self.data.transaction():
+            self.data.replace(fresh.source)
+            self.data.mark_saved()
 
     def commit(self) -> None:
         """Encode derived data's edits and write them back over its contents in the parent.

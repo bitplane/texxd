@@ -29,7 +29,11 @@ ADDED = 1
 CHUNK_SIZE = 1024 * 1024
 
 
-class ResizeError(Exception):
+class EditError(Exception):
+    """Raised when an edit can't be made."""
+
+
+class ResizeError(EditError):
     """Raised when an edit would change the size of something that can't be resized."""
 
 
@@ -140,6 +144,16 @@ class Data:
         offset = self.parent.from_root(offset)
         return None if offset is None else self.from_parent(offset)
 
+    def to_buffer(self, offset: int) -> Optional[int]:
+        """Where byte ``offset`` is in the buffer holding this data's edits, if it maps there."""
+        data = self
+        while data is not data.root:
+            offset = data.to_parent(offset)
+            if offset is None:
+                return None
+            data = data.parent
+        return offset
+
     def from_buffer(self, offset: int) -> Optional[int]:
         """Where byte ``offset`` of the buffer holding this data's edits is in this data, if it maps here."""
         if self is self.root:
@@ -189,6 +203,8 @@ class Buffer(Data):
         self._saved_version = 0
         # derived data shares its history with the data it came from
         self.history: History = parent.root.history if parent is not None else History()
+        # called with each new edit before it's made; they raise to refuse it
+        self.guards: list[Listener] = []
 
     @classmethod
     def open(cls, path: Path) -> "Buffer":
@@ -247,20 +263,42 @@ class Buffer(Data):
         self.history.defer(key, priority, work)
 
     def _state(self) -> tuple:
-        return self._pieces, self._size, self._version, self._saved_version
+        return self._source, self._pieces, self._size, self._version, self._saved_version
 
     def _restore(self, state: tuple) -> None:
-        self._pieces, self._size, self._version, self._saved_version = state
+        self._source, self._pieces, self._size, self._version, self._saved_version = state
 
     def _begin_step(self) -> tuple:
         """A step is about to edit this buffer: returns the state to go back to, and bumps the version."""
-        state = (self._pieces.copy(), self._size, self._version, self._saved_version)
+        state = (self._source, self._pieces.copy(), self._size, self._version, self._saved_version)
         self._version = self._next_version
         self._next_version += 1
         return state
 
     def _record(self, change: Change) -> None:
         self.history.record(self, change)
+
+    def _check(self, change: Change) -> None:
+        for guard in self.guards:
+            guard(change)
+
+    def replace(self, source: Source, record: bool = True) -> None:
+        """Replace the whole contents with ``source``'s.
+
+        With ``record`` False it isn't an undo step of its own: for derived
+        data decoded again because what it came from changed, which undo will
+        change back.
+        """
+        change = Change(0, self._size, source.size)
+        with self.transaction():
+            if record:
+                self._record(change)
+            self._source = source
+            self._pieces = RangeMap(_adjust_piece)
+            self._size = source.size
+            if self._size:
+                self._pieces[0 : self._size] = (ORIGINAL, 0)
+            self._emit(change)
 
     def _add(self, offset: int, data: bytes) -> None:
         """Append data to the add buffer and map [offset, offset + len) onto it."""
@@ -276,6 +314,7 @@ class Buffer(Data):
             raise IndexError(f"write at {offset} outside buffer of size {self._size}")
         replaced = min(len(data), self._size - offset)
         change = Change(offset, replaced, len(data), origin)
+        self._check(change)
         with self.transaction():
             self._record(change)
             self._add(offset, data)
@@ -288,6 +327,7 @@ class Buffer(Data):
         if offset < 0 or offset > self._size:
             raise IndexError(f"insert at {offset} outside buffer of size {self._size}")
         change = Change(offset, 0, len(data), origin)
+        self._check(change)
         with self.transaction():
             self._record(change)
             self._pieces.shift(offset, len(data))
@@ -300,6 +340,7 @@ class Buffer(Data):
         if size <= 0 or offset < 0:
             return
         change = Change(offset, size, 0, origin)
+        self._check(change)
         with self.transaction():
             self._record(change)
             self._pieces.shift(offset, -size)

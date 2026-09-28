@@ -1,6 +1,6 @@
 """Data model: byte sources, editable buffers and range maps."""
 
-from .buffer import Buffer, Change, Data, ResizeError, Window
+from .buffer import Buffer, Change, Data, EditError, ResizeError, Window
 from .history import History
 from .io import DataReader
 from .rangemap import RangeMap
@@ -12,6 +12,7 @@ __all__ = [
     "Change",
     "Data",
     "DataReader",
+    "EditError",
     "FileSource",
     "History",
     "RangeMap",

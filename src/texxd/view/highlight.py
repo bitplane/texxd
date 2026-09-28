@@ -5,11 +5,14 @@ None for unstyled) and modifies the styles in place. They run in order, so
 later ones win where they set the same attributes.
 """
 
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from rich.style import Style
 
 from ..data import Data
+
+if TYPE_CHECKING:
+    from ..document import Document
 
 Styles = List[Optional[Style]]
 
@@ -45,7 +48,13 @@ class DataHighlighter(Highlighter):
     space_style = Style(color="cyan")
     control_style = Style(color="bright_cyan", bold=True)
 
+    def __init__(self) -> None:
+        # off for text, where bytes above 0x7f are just characters
+        self.enabled = True
+
     def highlight(self, data: bytes, offset: int, styles: Styles) -> None:
+        if not self.enabled:
+            return
         for i, byte in enumerate(data):
             if byte == 0x00:
                 style = self.null_style
@@ -70,6 +79,29 @@ class EditHighlighter(Highlighter):
         for start, stop in self.data.edits(offset, offset + len(data)):
             for i in range(start - offset, stop - offset):
                 styles[i] = combine(styles[i], self.style)
+
+
+class StaleHighlighter(Highlighter):
+    """Dims encoded bytes that are out of date: their decoded data has edits not written back yet."""
+
+    style = Style(dim=True, italic=True, bgcolor="grey19")
+
+    def __init__(self, document: "Document", data: Data):
+        self.document = document
+        self.data = data
+
+    def highlight(self, data: bytes, offset: int, styles: Styles) -> None:
+        base = self.data.to_buffer(0)
+        if base is None:
+            return
+        end = offset + len(data)
+        for node in self.document.stale():
+            span = node.span
+            if span.root is not self.data.root:
+                continue
+            start = span.to_buffer(0) - base
+            for i in range(max(start, offset), min(start + span.size, end)):
+                styles[i - offset] = combine(styles[i - offset], self.style)
 
 
 class RangeHighlighter(Highlighter):

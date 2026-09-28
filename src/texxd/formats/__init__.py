@@ -55,6 +55,10 @@ class Format:
     has_regions = False
     # True if fixup() can cope with an opened region's contents changing size
     can_resize = False
+    # what the data opened from its regions is: "bytes", or "text" (always UTF-8)
+    contents = "bytes"
+    # False if data opened by this format shouldn't be detected as this format again
+    nests = True
 
     @classmethod
     def sniff(cls, data: Data) -> float:
@@ -65,6 +69,11 @@ class Format:
     def regions(cls, data: Data) -> list[Region]:
         """Parse the structure into top level regions, in order. Formats without structure return []."""
         return []
+
+    @classmethod
+    def for_region(cls, region: Region) -> type["Format"]:
+        """The format to open ``region`` with: this one, or a more particular one it found."""
+        return cls
 
     @classmethod
     def open(cls, data: Data, region: Region) -> Data:
@@ -106,8 +115,9 @@ def registry() -> list[type[Format]]:
     """All known formats."""
     from .gzip import Gzip
     from .tar import Tar
+    from .text import Text
 
-    return [Gzip, Tar, Binary]
+    return [Gzip, Tar, Text, Binary]
 
 
 def detect(data: Data) -> list[type[Format]]:

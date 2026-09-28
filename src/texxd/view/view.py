@@ -11,6 +11,11 @@ only have bytes on the rows their data covers, and are blank elsewhere.
 Moving the cursor to another level re-maps the rows to that level, keeping
 bytes on the same screen rows where it can.
 
+How a level splits into rows is up to its columns: usually a fixed number of
+bytes per row, but a text level's rows are lines of text. While it has the
+cursor, other levels show each line's bytes; while another level has it, the
+text level shows the characters in each of that level's rows.
+
 Levels line up by where their bytes are in the root buffer. A level whose
 bytes don't map there directly (derived data, like a decompressed stream)
 can't line up, so it's only drawn while it has the cursor.
@@ -31,16 +36,25 @@ from textual.message import Message
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
 
-from ..data import Buffer, ResizeError
-from ..dialogs import GoToOffsetModal
+from ..data import Buffer, EditError, ResizeError
+from ..dialogs import ChoiceModal, EncodingModal, GoToOffsetModal
 from ..document import Document
 from ..formats import Format, Region
 from ..log import get_logger
-from ..node import Node
+from ..node import Node, StaleError
 from .columns import Column, CursorCell
 from .cursor import Cursor
-from .highlight import ACTIVE_STYLE, INACTIVE_STYLE, DataHighlighter, EditHighlighter, Highlights, RangeHighlighter
+from .highlight import (
+    ACTIVE_STYLE,
+    INACTIVE_STYLE,
+    DataHighlighter,
+    EditHighlighter,
+    Highlights,
+    RangeHighlighter,
+    StaleHighlighter,
+)
 from .registry import columns_for
+from .rows import ByteRows, Rows
 
 logger = get_logger(__name__)
 
@@ -59,6 +73,25 @@ class Level:
         self.columns: list[Column] = columns_for(node)
         # the column of the level to the left that opened this one
         self.origin = origin
+        self.insert_mode = node.resizable and any(column.prefers_insert for column in self.columns)
+
+    @property
+    def flexible(self) -> bool:
+        """True if some of its columns take whatever room there is."""
+        return any(column.flexible for column in self.columns)
+
+    @property
+    def byte_colours(self) -> bool:
+        """True if its bytes should be coloured by kind (nulls, spaces...), as they are in hex."""
+        return not any(column.prefers_insert for column in self.columns)
+
+    def rows(self, bytes_per_line: int, limit: int) -> Rows:
+        """How to split it into rows while it has the cursor."""
+        for column in self.columns:
+            rows = column.rows(bytes_per_line, limit)
+            if rows is not None:
+                return rows
+        return ByteRows(bytes_per_line, limit)
 
     @property
     def size(self) -> int:
@@ -106,6 +139,7 @@ class HexView(ScrollView, can_focus=True):
         Binding("escape", "close_level", "Close"),
         Binding("insert", "toggle_insert", "Ins/Ovr"),
         Binding("ctrl+g", "goto", "Go to"),
+        Binding("ctrl+k", "commit", "Commit"),
     ]
 
     ACTION_KEYS = {
@@ -113,6 +147,7 @@ class HexView(ScrollView, can_focus=True):
         "shift+tab": "previous_column",
         "insert": "toggle_insert",
         "ctrl+g": "goto",
+        "ctrl+k": "commit",
         "enter": "open",
         "escape": "close_level",
         "ctrl+z": "app.undo",
@@ -130,14 +165,15 @@ class HexView(ScrollView, can_focus=True):
         self.cursor = Cursor()
         # (level index, column index) of the column with the cursor; that level drives the rows
         self.active = (0, 1)
-        self.insert_mode = False
         # centre the cursor next time it has to scroll, for jumps
         self._center = False
         self.edits = EditHighlighter(node.data)
+        self.stale = StaleHighlighter(document, node.data)
         self.selection = RangeHighlighter()
         self.highlights = Highlights()
         self.highlights["data"] = DataHighlighter()
         self.highlights["edits"] = self.edits
+        self.highlights["stale"] = self.stale
         self.highlights["selection"] = self.selection
         self._update_layout()
 
@@ -153,6 +189,14 @@ class HexView(ScrollView, can_focus=True):
     @property
     def data(self):
         return self.level.node.data
+
+    @property
+    def insert_mode(self) -> bool:
+        return self.level.insert_mode
+
+    @insert_mode.setter
+    def insert_mode(self, value: bool) -> None:
+        self.level.insert_mode = value
 
     @property
     def active_column(self) -> Column:
@@ -244,26 +288,50 @@ class HexView(ScrollView, can_focus=True):
         self.cursor.limit = size if self.node.resizable else max(0, size - 1)
         if self.cursor.position > self.cursor.limit:
             self.cursor.set_position(self.cursor.limit)
+        # the bytes at the top, to keep there if the rows change
+        old_rows = self.cursor.rows
+        top = old_rows.start(max(0, min(int(self.scroll_y), old_rows.count - 1)))
 
         available = self.scrollable_content_region.width if self.is_mounted else 0
         bytes_per_line = BYTES_PER_LINE[0]
-        if available:
+        # flexible levels fit whatever's left, so size the rows for the rightmost other one
+        sizing = next((level for level in reversed(self.levels) if not level.flexible), None)
+        if available and sizing is not None:
             bytes_per_line = BYTES_PER_LINE[-1]
             for candidate in BYTES_PER_LINE:
-                if self.levels[-1].width(candidate) <= available:
+                if sizing.width(candidate) <= available:
                     bytes_per_line = candidate
                     break
-        old = self.cursor.bytes_per_line
         self.cursor.bytes_per_line = bytes_per_line
+        self._fit_columns(bytes_per_line, available)
 
-        lines = self.cursor.limit // bytes_per_line + 1
+        rows = self.level.rows(bytes_per_line, self.cursor.limit)
+        self.cursor.layout = None if isinstance(rows, ByteRows) else rows
+        self.highlights["data"].enabled = self.level.byte_colours
         width = self._level_x(len(self.levels), bytes_per_line) - len(LEVEL_GAP)
-        self.virtual_size = Size(width, lines + HEADER_LINES)
-        if old != bytes_per_line and self.is_mounted:
-            # keep the same bytes at the top rather than the same line number
-            self.scroll_to(y=int(self.scroll_y) * old // bytes_per_line, animate=False, immediate=True)
+        self.virtual_size = Size(width, rows.count + HEADER_LINES)
+        if self.is_mounted and rows.row_of(top) != int(self.scroll_y):
+            self.scroll_to(y=rows.row_of(top), animate=False, immediate=True)
         self._update_selection()
         self.refresh()
+
+    def _fit_columns(self, bytes_per_line: int, available: int) -> None:
+        """Give the rightmost level's flexible columns the room left on screen."""
+        if not available:
+            return
+        index = len(self.levels) - 1
+        level = self.levels[index]
+        if not level.flexible:
+            return
+        fixed = [w for column, w in zip(level.columns, level.widths(bytes_per_line)) if not column.flexible]
+        taken = sum(fixed) + len(level.columns) - 1
+        room = available - self._level_x(index, bytes_per_line) - taken
+        if room < 40:
+            # not much left: it'll be scrolled to anyway, so fill the screen
+            room = available - taken
+        for column in level.columns:
+            if column.flexible:
+                column.fit(room)
 
     def _update_selection(self) -> None:
         """Tell every column where the cursor is, and highlight what the active one selects."""
@@ -375,10 +443,10 @@ class HexView(ScrollView, can_focus=True):
             self.cursor.set_position(position)
             self._cursor_moved()
             return
-        top = int(self.scroll_y)
+        old_rows = self.cursor.rows
+        top = old_rows.start(max(0, min(int(self.scroll_y), old_rows.count - 1)))
         shift = self._shift(old, new)
-        self.insert_mode = self.insert_mode and self.node.resizable
-        self.edits.data = self.data
+        self.edits.data = self.stale.data = self.data
         self._update_layout()
         self.cursor.set_position(position)
         self._update_selection()
@@ -387,7 +455,7 @@ class HexView(ScrollView, can_focus=True):
             self._center = True
             self._after_level_change(0)
         else:
-            self._after_level_change(top + shift // self.cursor.bytes_per_line)
+            self._after_level_change(self.cursor.rows.row_of(max(0, top + shift)))
 
     def open_region(self, fmt: type[Format], region: Region, origin: int) -> None:
         """Open a region of the level with the cursor as a new level to its right.
@@ -396,7 +464,12 @@ class HexView(ScrollView, can_focus=True):
         """
         index = self.active[0]
         position = self.cursor.position
-        child = self.node.child(fmt, region)
+        try:
+            child = self.node.child(fmt, region)
+        except Exception as e:
+            logger.exception(f"couldn't open {region.name}")
+            self.notify(f"Couldn't open {region.name}: {e}", severity="error")
+            return
         del self.levels[index + 1 :]
         self.levels.append(Level(child, origin))
         # stay on the same byte if it's in there
@@ -448,17 +521,19 @@ class HexView(ScrollView, can_focus=True):
             strip = Strip(self._render_header(bytes_per_line))
             return strip.crop_extend(scroll_x, scroll_x + width, None).apply_style(self.rich_style)
 
-        line = y - HEADER_LINES + int(self.scroll_y)
-        offset = line * bytes_per_line
-        if offset > self.cursor.limit:
+        rows = self.cursor.rows
+        row = y - HEADER_LINES + int(self.scroll_y)
+        if row >= rows.count:
             return Strip.blank(width, self.rich_style)
+        offset = rows.start(row)
 
         driving = self.level
-        data = self.data.read(offset, bytes_per_line)
+        data = self.data.read(offset, rows.stop(row) - offset)
         styles = [None] * len(data)
         self.highlights.highlight(data, offset, styles)
 
-        cursor_index = self.cursor.position - offset
+        # where the cursor is on this row, if it's on it
+        cursor_index = self.cursor.position - offset if self.cursor.y == row else -1
         segments: list[Segment] = []
         for level_index, level in enumerate(self.levels):
             if level_index:
@@ -480,7 +555,7 @@ class HexView(ScrollView, can_focus=True):
                     segments.append(Segment(" "))
                 cell = None
                 in_level = first <= cursor_index < end or (level is driving and cursor_index == len(data))
-                if column.byte_cursor and 0 <= cursor_index < bytes_per_line and in_level:
+                if column.byte_cursor and 0 <= cursor_index and in_level:
                     is_active = (level_index, column_index) == self.active and self.has_focus
                     style = ACTIVE_STYLE if is_active else INACTIVE_STYLE
                     cell = CursorCell(cursor_index, style, self.cursor.nibble if is_active else 0)
@@ -496,14 +571,13 @@ class HexView(ScrollView, can_focus=True):
     async def on_key(self, event: events.Key) -> None:
         key = event.key
         char = event.character
-        if key in self.ACTION_KEYS:
+        if self.active_column.on_key(self, key, char):
+            pass
+        elif key in self.ACTION_KEYS:
             event.stop()
             event.prevent_default()
             await self.run_action(self.ACTION_KEYS[key])
             return
-
-        if self.active_column.on_key(self, key, char):
-            pass
         elif self._navigate(key):
             pass
         elif key == "delete":
@@ -551,6 +625,40 @@ class HexView(ScrollView, can_focus=True):
             where = f" inside {self.node.parent.name}" if self.node.parent else ""
             self.notify(f"{self.node.name}{where} can't change size (yet)", severity="warning")
             return False
+        except StaleError as e:
+            self._resolve_stale(e.node)
+            return False
+
+    def _resolve_stale(self, node: Node) -> None:
+        """Ask what to do about derived data's uncommitted edits, for an edit to the bytes they'll replace."""
+
+        def answer(choice: Optional[str]) -> None:
+            try:
+                if choice == "commit":
+                    node.commit()
+                elif choice == "discard":
+                    node.discard()
+            except (EditError, NotImplementedError) as e:
+                self.notify(f"Couldn't commit {node.name}: {e}", severity="error")
+            self.refresh()
+
+        question = (
+            f"{node.name} has edits that haven't been written back to {node.parent.name}, "
+            "so these bytes are out of date. Commit them first, or discard them?"
+        )
+        choices = [("commit", "Commit", "c"), ("discard", "Discard", "d"), ("cancel", "Cancel", "escape")]
+        self.app.push_screen(ChoiceModal(question, choices), answer)
+
+    def action_commit(self) -> None:
+        """Write edits to derived data (like decompressed contents) back into their parents."""
+        if not self.document.stale():
+            self.notify("Nothing to commit")
+            return
+        try:
+            self.document.commit()
+        except (EditError, NotImplementedError) as e:
+            self.notify(f"Commit failed: {e}", severity="error")
+        self.refresh()
 
     def type_nibble(self, digit: int) -> None:
         """Type a hex digit at the cursor."""
@@ -582,10 +690,31 @@ class HexView(ScrollView, can_focus=True):
             self.cursor.move(1)
         self._cursor_moved()
 
+    def type_text(self, text: str) -> None:
+        """Type text at the cursor, for levels whose data is UTF-8 text."""
+        encoded = text.encode("utf-8", "surrogatepass")
+        position = self.cursor.position
+        rows = self.cursor.rows
+        # overwriting replaces a character, but not the end of a line
+        end = position
+        if not self.insert_mode and position < self.data.size and self.data.read(position, 1) not in b"\r\n":
+            end = rows.step(position, 1)
+
+        def edit() -> None:
+            with self.data.root.transaction():
+                if end > position:
+                    self.data.delete(position, end - position)
+                self.data.insert(position, encoded)
+
+        if self._edit(edit):
+            self.cursor.set_position(position + len(encoded))
+        self._cursor_moved()
+
     def _delete(self) -> None:
         position = self.cursor.position
         if position < self.data.size:
-            self._edit(lambda: self.data.delete(position, 1))
+            end = self.cursor.rows.step(position, 1)
+            self._edit(lambda: self.data.delete(position, end - position))
         self._cursor_moved()
 
     def _backspace(self) -> None:
@@ -593,9 +722,9 @@ class HexView(ScrollView, can_focus=True):
         if cursor.nibble:
             cursor.nibble = 0
         elif cursor.position > 0:
-            position = cursor.position - 1
-            if self._edit(lambda: self.data.delete(position, 1)):
-                cursor.move(-1)
+            start = cursor.rows.step(cursor.position, -1)
+            if self._edit(lambda: self.data.delete(start, cursor.position - start)):
+                cursor.set_position(start)
         self._cursor_moved()
 
     # mouse
@@ -632,11 +761,18 @@ class HexView(ScrollView, can_focus=True):
         if shift is None:
             return  # a level that doesn't line up with this one, so it's blank
         bytes_per_line = self.cursor.bytes_per_line
-        line = (event.y - HEADER_LINES + int(self.scroll_y)) * bytes_per_line + shift
+        rows = self.cursor.rows
+        row = event.y - HEADER_LINES + int(self.scroll_y)
+        below = row >= rows.count
+        row = min(row, rows.count - 1)
+        line, stop = rows.start(row) + shift, rows.stop(row) + shift
         column = level.columns[column_index]
-        position = column.click(line, column_x, bytes_per_line, level.size)
+        position = column.click(line, stop, column_x, bytes_per_line, level.size)
         if position is None:
             return
+        if below:
+            # past the last row: the end
+            position = self.cursor.limit + shift
         if level is not self.level and not 0 <= position < level.size:
             return  # a blank part of another level
         if not column.focusable:
@@ -664,6 +800,33 @@ class HexView(ScrollView, can_focus=True):
 
     def action_previous_column(self) -> None:
         self._cycle_column(-1)
+
+    def choose_encoding(self) -> None:
+        """Ask which encoding to read the text level with the cursor as, and reopen it."""
+        node = self.node
+        if node.parent is None or node.fmt is None or not hasattr(node.fmt, "using"):
+            return
+        if node.stale:
+            self.notify(f"{node.name} has edits: commit (^k) or undo them first", severity="warning")
+            return
+
+        def chosen(encoding: Optional[str]) -> None:
+            if encoding:
+                self.reopen(node.fmt.using(encoding))
+
+        self.app.push_screen(EncodingModal(node.fmt.encoding, node.fmt.suggestions(node.parent.data)), chosen)
+
+    def reopen(self, fmt: type[Format]) -> None:
+        """Close the level with the cursor and open its region again with ``fmt``."""
+        index = self.active[0]
+        level = self.levels[index]
+        region = level.node.region
+        self.close_levels_after(index - 1)
+        found = next((r for r in self.node.regions(fmt) if r.start == region.start), None)
+        if found is None:
+            self.notify(f"{region.name} can't be read as {fmt.name}", severity="error")
+            return
+        self.open_region(fmt, found, level.origin if level.origin is not None else self.level.default_column)
 
     def action_toggle_insert(self) -> None:
         if not self.node.resizable:
