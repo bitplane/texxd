@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.screen import ModalScreen
@@ -56,7 +57,8 @@ class TexxdApp(App):
         self.query_one(HexView).focus()
 
     def on_location_changed(self, message: LocationChanged) -> None:
-        self.query_one(StatusBar).update(self.query_one(HexView).status)
+        # names like "[json]" aren't markup
+        self.query_one(StatusBar).update(escape(self.query_one(HexView).status))
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         # leave dialogs' own keys alone

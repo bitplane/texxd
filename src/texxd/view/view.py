@@ -223,6 +223,13 @@ class HexView(ScrollView, can_focus=True):
             where = f"{described} │ {where}"
         return f"{path} │ {where} │ {mode}"
 
+    def relayout(self, position: Optional[int] = None) -> None:
+        """The rows changed (like a tree folding): lay them out again, and move the cursor to ``position``."""
+        self._update_layout()
+        if position is not None:
+            self.cursor.set_position(position)
+        self._cursor_moved()
+
     def go_to(self, offset: int) -> None:
         """Move the cursor to ``offset`` in the level with the cursor."""
         self.cursor.set_position(offset)
@@ -326,7 +333,7 @@ class HexView(ScrollView, can_focus=True):
         fixed = [w for column, w in zip(level.columns, level.widths(bytes_per_line)) if not column.flexible]
         taken = sum(fixed) + len(level.columns) - 1
         room = available - self._level_x(index, bytes_per_line) - taken
-        if room < 40:
+        if room < max(column.min_width for column in level.columns if column.flexible):
             # not much left: it'll be scrolled to anyway, so fill the screen
             room = available - taken
         for column in level.columns:
@@ -476,7 +483,7 @@ class HexView(ScrollView, can_focus=True):
         target = child.data.from_parent(position)
         if target is None or target >= child.data.size:
             target = 0
-        self.set_active(len(self.levels) - 1, self.level.default_column, target)
+        self.set_active(len(self.levels) - 1, self.levels[-1].default_column, target)
 
     def close_levels_after(self, index: int) -> None:
         """Close the levels to the right of ``index``."""

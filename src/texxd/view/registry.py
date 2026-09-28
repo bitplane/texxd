@@ -10,8 +10,16 @@ from collections.abc import Callable
 from ..node import Node
 from .columns import AddressColumn, Column, HexColumn, StructureColumn, TextColumn
 from .text import LineColumn, TextEditColumn
+from .tree import TreeColumn
 
 View = Callable[[Node], list[Column]]
+
+
+def tree_view(node: Node) -> list[Column]:
+    """A tree, for data opened as one (like JSON)."""
+    if node.fmt is None or node.fmt.contents != "tree":
+        return []
+    return [TreeColumn(node)]
 
 
 def text_view(node: Node) -> list[Column]:
@@ -29,10 +37,13 @@ def bytes_view(node: Node) -> list[Column]:
 
 def structure_view(node: Node) -> list[Column]:
     """A structure column for each format the node could be that has any."""
+    if node.fmt is not None and node.fmt.contents == "tree":
+        # the tree is its structure
+        return []
     return [StructureColumn(node, fmt) for fmt in node.formats if fmt.has_regions]
 
 
-MAIN_VIEWS: list[View] = [text_view, bytes_view]
+MAIN_VIEWS: list[View] = [tree_view, text_view, bytes_view]
 EXTRA_VIEWS: list[View] = [structure_view]
 
 

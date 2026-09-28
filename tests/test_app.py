@@ -212,8 +212,8 @@ async def test_drill_into_nested_tar_and_edit(nested_tar):
         await pilot.pause()
         assert [level.node.name for level in view.levels] == ["outer.tar", "inner.tar", "data.json"]
         assert view.data.read(0, 9) == b'{"a": 1}\n'
-        # it's text, so that's what it can be opened as
-        assert [c.title for c in view.level.columns if isinstance(c, StructureColumn)] == ["text"]
+        # it's JSON, and text, so that's what it can be opened as
+        assert [c.title for c in view.level.columns if isinstance(c, StructureColumn)] == ["json", "text"]
 
         await pilot.press("tab", "X")
         await pilot.press("delete")  # resizes it, and both tars are fixed up
@@ -453,3 +453,34 @@ async def test_text_editing(tmp_path):
         await pilot.press("ctrl+s")
         await pilot.pause()
         assert path.read_bytes() == "one\ntwo\n本\n".encode()
+
+
+async def test_json_tree(tmp_path):
+    path = tmp_path / "app.json"
+    path.write_bytes(b'{\n  "name": "texxd",\n  "authors": [{"name": "Gaz"}, {"name": "Claude"}],\n  "n": 3\n}\n')
+    app = TexxdApp(path)
+    async with app.run_test(size=(160, 30)) as pilot:
+        await pilot.pause()
+        view = hex_view(app)
+        assert [c.title for c in view.level.columns if isinstance(c, StructureColumn)] == ["json", "text"]
+        await pilot.press("tab", "tab", "enter")
+        await pilot.pause()
+        assert view.active == (1, 0) and view.cursor.position == 0
+        lines = [view.render_line(y).text for y in range(1, 6)]
+        # each node on its row, with its bytes in the hex beside it
+        assert "▾ { 3 keys" in lines[0] and lines[1].startswith("0004: 22 6e 61 6d 65")
+        assert 'name: "texxd"' in lines[1] and "▸ authors: [{" in lines[2] and "n: 3" in lines[3]
+        # unfold, go in, and back out
+        await pilot.press("down", "down", "right")
+        await pilot.pause()
+        assert "▾ authors: [ 2 items" in view.render_line(3).text and "▸ [0]: {" in view.render_line(4).text
+        await pilot.press("right", "right", "right")
+        await pilot.pause()
+        assert "▸ [0]" not in view.render_line(4).text and 'name: "Gaz"' in view.render_line(5).text
+        assert "$.authors[0].name" in view.status
+        # out to [0], fold it, out to authors, fold that
+        await pilot.press("left", "left", "left", "left")
+        await pilot.pause()
+        assert "▸ authors: [{" in view.render_line(3).text and view.cursor.position == 0x17
+        # the selected node's bytes are highlighted in the other levels
+        assert view.selection.ranges[0][:2] == (0x17, 0x17 + len('"authors": [{"name": "Gaz"}, {"name": "Claude"}]'))

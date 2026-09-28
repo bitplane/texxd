@@ -44,8 +44,9 @@ class Column:
     byte_cursor = False
     # typing should insert rather than overwrite, where the data can grow
     prefers_insert = False
-    # it can be as wide as there's room for: see fit()
+    # it can be as wide as there's room for (but no narrower than min_width): see fit()
     flexible = False
+    min_width = 0
     title = ""
 
     def width(self, bytes_per_line: int, size: int) -> int:
