@@ -13,10 +13,9 @@ from rich.segment import Segment
 from rich.style import Style
 
 from ..formats import Format, Region
-from .highlight import ACTIVE_STYLE, INACTIVE_STYLE, Styles, combine
+from .highlight import Styles, combine
 
 if TYPE_CHECKING:
-    from ..node import Node
     from .rows import Rows
     from .view import HexView
 
@@ -207,116 +206,3 @@ class TextColumn(Column):
             view.type_byte(ord(char))
             return True
         return False
-
-
-def human_size(size: int) -> str:
-    """Format a byte count compactly."""
-    value = float(size)
-    for unit in ("", "K", "M", "G"):
-        if value < 1024:
-            return f"{size}" if not unit else f"{value:.1f}{unit}"
-        value /= 1024
-    return f"{value:.1f}T"
-
-
-class StructureColumn(Column):
-    """A format's structure, drawn beside the bytes it describes.
-
-    Each region's name sits on the row where it starts, with a bracket running
-    down to the row where it ends. It shows the same rows as the hex column,
-    so it scrolls with it. With the cursor in it, the region under the cursor
-    is selected and its bytes are tinted: header and contents separately.
-    """
-
-    focusable = True
-    name_width = 30
-    size_width = 6
-    header_style = Style(bgcolor="orange4")
-    contents_style = Style(bgcolor="deep_sky_blue4")
-
-    def __init__(self, node: "Node", fmt: type[Format]):
-        self.node = node
-        self.fmt = fmt
-        self.title = fmt.name
-        self.selected: Optional[Region] = None
-        self.selected_style: Optional[Style] = None
-
-    def regions(self) -> list[Region]:
-        return self.node.regions(self.fmt)
-
-    def width(self, bytes_per_line: int, size: int) -> int:
-        longest = max((len(r.name) for r in self.regions()), default=0)
-        return 2 + max(10, min(self.name_width, longest)) + 1 + self.size_width
-
-    def region_for_line(self, offset: int, bytes_per_line: int) -> Optional[Region]:
-        """The region that starts on this line, or else the one the line is inside."""
-        region = self.node.region_before(offset + bytes_per_line, self.fmt)
-        if region and region.stop > offset:
-            return region
-        return None
-
-    def render(self, offset, data, styles, bytes_per_line, size, cursor, first=0) -> List[Segment]:
-        width = self.width(bytes_per_line, size)
-        region = self.region_for_line(offset, bytes_per_line)
-        if region is None:
-            return [Segment(" " * width)]
-        end = offset + bytes_per_line
-        style = self.selected_style if self.selected and self.selected.start == region.start else None
-        if region.start >= offset:
-            marker = "─" if region.stop <= end else "┬"
-            name_width = width - 3 - self.size_width
-            name = region.name if len(region.name) <= name_width else region.name[: name_width - 1] + "…"
-            size_text = human_size(region.data_size) if region.kind == "file" else region.kind
-            text = f"{marker} {name:<{name_width}} {size_text[: self.size_width]:>{self.size_width}}"
-            return [Segment(marker, style), Segment(text[1:], combine(style, Style(bold=True)) if style else None)]
-        marker = "└" if region.stop <= end else "│"
-        return [Segment(marker, style), Segment(" " * (width - 1))]
-
-    def click(self, line: int, stop: int, x: int, bytes_per_line: int, size: int) -> Optional[int]:
-        # stay on the clicked line so the view doesn't jump, but inside the region
-        region = self.region_for_line(line, bytes_per_line)
-        if region is None:
-            return None
-        return min(max(line, region.start), region.stop - 1)
-
-    def on_key(self, view: "HexView", key: str, char: Optional[str]) -> bool:
-        if key not in ("up", "down"):
-            return False
-        target = self._step(view.cursor.position, -1 if key == "up" else 1)
-        if target is not None:
-            view.go_to(target)
-        return True
-
-    def _step(self, position: int, direction: int) -> Optional[int]:
-        """The start of the previous or next region."""
-        regions = self.regions()
-        if direction > 0:
-            return next((r.start for r in regions if r.start > position), None)
-        current = self.node.region_at(position, self.fmt)
-        if current and current.start < position:
-            return current.start
-        return next((r.start for r in reversed(regions) if r.start < position), None)
-
-    def sync(self, cursor: Optional[int], opened: Optional[Region], focused: bool) -> Ranges:
-        if cursor is None:
-            self.selected = opened
-            self.selected_style = INACTIVE_STYLE
-            return []
-        self.selected = region = self.node.region_at(cursor, self.fmt)
-        self.selected_style = ACTIVE_STYLE if focused else INACTIVE_STYLE
-        if region is None:
-            return []
-        return [
-            (region.start, region.data_start, self.header_style),
-            (region.data_start, region.data_stop, self.contents_style),
-        ]
-
-    def region_at(self, offset: int) -> Optional[tuple[type[Format], Region]]:
-        region = self.node.region_at(offset, self.fmt)
-        return (self.fmt, region) if region else None
-
-    def describe(self, offset: int) -> Optional[str]:
-        region = self.node.region_at(offset, self.fmt)
-        if region is None:
-            return None
-        return f"{region.name}: {region.data_size} bytes at 0x{region.data_start:x}"

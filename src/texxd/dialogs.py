@@ -125,29 +125,30 @@ class ChoiceModal(ModalScreen[str | None]):
         self.dismiss(id or None)
 
 
-class EncodingModal(ModalScreen[str | None]):
-    """Pick a character encoding."""
+class PickModal(ModalScreen[str | None]):
+    """Pick one of a list of choices."""
 
-    DEFAULT_CSS = DIALOG_CSS.format(name="EncodingModal") + "EncodingModal OptionList { height: 12; }"
+    DEFAULT_CSS = DIALOG_CSS.format(name="PickModal") + "PickModal OptionList { max-height: 12; height: auto; }"
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, current: str | None, encodings: list[str]):
+    def __init__(self, question: str, choices: list[str], current: str | None = None):
         super().__init__()
+        self.question = question
+        self.choices = choices
         self.current = current
-        self.encodings = encodings
 
     def compose(self) -> ComposeResult:
         with Container():
-            yield Label(f"Read as (now {self.current}):")
-            yield OptionList(*self.encodings)
+            yield Label(self.question)
+            yield OptionList(*self.choices)
 
     def on_mount(self) -> None:
         options = self.query_one(OptionList)
-        options.highlighted = self.encodings.index(self.current) if self.current in self.encodings else 0
+        options.highlighted = self.choices.index(self.current) if self.current in self.choices else 0
         options.focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(self.encodings[event.option_index])
+        self.dismiss(self.choices[event.option_index])
 
     def action_cancel(self) -> None:
         self.dismiss(None)

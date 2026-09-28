@@ -135,6 +135,11 @@ class JsonNode:
         return f"JsonNode({self.kind} {self.label!r} {self.start}:{self.stop})"
 
     @property
+    def hidden(self) -> bool:
+        """A stream has no row of its own: its documents are the top rows."""
+        return self.kind == "stream"
+
+    @property
     def row_start(self) -> int:
         return self.start if self.key_start is None else self.key_start
 

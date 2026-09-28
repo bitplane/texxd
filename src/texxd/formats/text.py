@@ -16,6 +16,14 @@ from ..data import Buffer, BytesSource, Data, EditError, Window
 from . import Format, Region
 
 SAMPLE = 16 * 1024
+# how sure chardet has to be before a guess of an old Mac encoding is believed
+LIKELY = 0.5
+MAC_LOOKALIKES = {
+    "mac-cyrillic": "cp1251",
+    "mac-greek": "cp1253",
+    "mac-turkish": "cp1254",
+    "mac-latin2": "cp1250",
+}
 
 # longest first, so UTF-32's BOM isn't taken for UTF-16's
 BOMS = [
@@ -90,9 +98,14 @@ def detect(data: Data) -> Optional[tuple[str, float]]:
     if not guess.get("encoding"):
         return None
     try:
-        return normalize(guess["encoding"]), 0.3
+        encoding = normalize(guess["encoding"])
     except LookupError:
         return None
+    if encoding.startswith("mac-") and guess.get("confidence", 0) < LIKELY:
+        # old Mac encodings are what chardet reaches for when there's too little text to go on:
+        # the Windows encoding for the same script is far more likely
+        encoding = MAC_LOOKALIKES.get(encoding, "cp1252")
+    return encoding, 0.3
 
 
 class Text(Format):

@@ -187,3 +187,9 @@ def test_fast_wrapping_matches_wrapping_a_character_at_a_time(seed):
     for _ in range(50):
         body = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 40))).encode()
         assert list(rows._wrap(100, body)) == list(rows._wrap_tokens(100, body))
+
+
+def test_short_text_isnt_read_as_an_old_mac_encoding():
+    # chardet guesses MacIceland for this, with next to no confidence
+    assert detect_encoding(data("Grüße\n".encode("latin-1")))[0] == "cp1252"
+    assert detect_encoding(data("Привет, мир\n".encode("cp1251") * 5))[0] == "cp1251"

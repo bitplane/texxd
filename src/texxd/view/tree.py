@@ -4,8 +4,10 @@ A tree level's rows are the tree's visible nodes, one per row, in document
 order. Every node has a byte range, so levels beside it show each node's
 bytes on its row, and the tree shows the node for each row of theirs.
 
-Formats with ``contents = "tree"`` give a tree with ``fmt.tree(data)``. The
-tree only needs its nodes to have: ``kind``, ``label``, ``start``, ``stop``,
+The column is given a function that makes the tree: a format's
+``fmt.tree(data)`` for documents like JSON, or a listing of a format's
+regions. A root that's ``hidden`` has no row of its own: its children are the
+top rows. The tree only needs its nodes to have: ``kind``, ``label``, ``start``, ``stop``,
 ``row_start``, ``error``, ``container``, ``count``, ``child(i)``,
 ``find(label)``, ``index_at(position)``, ``parent``, ``index``, ``depth``,
 ``path`` and ``source(size)``; and to edit them, ``editable``,
@@ -20,6 +22,7 @@ being parsed again after an edit.
 """
 
 from bisect import bisect_left, bisect_right
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from rich.segment import Segment
@@ -70,7 +73,8 @@ class TreeRows(Rows):
         self.root = root
         self.unfolded = unfolded
         self.limit = limit
-        self.show_root = root.kind != "stream"
+        # a hidden root with nothing in it shows anyway, so there's a row to be on
+        self.show_root = not root.hidden or not root.count
         self._open: dict[int, _Open] = {}
         # the root is always open: there'd be nothing to see otherwise
         self._count = self._layout(root, unfolded) + (1 if self.show_root else 0)
@@ -227,8 +231,9 @@ class TreeColumn(Column):
     selection_style = Style(bgcolor="dark_green")
     field_style = Style(underline=True)
 
-    def __init__(self, node: "Node"):
+    def __init__(self, node: "Node", make_tree: Callable[[], Any]):
         self.node = node
+        self.make_tree = make_tree
         self.wrap = 60
         self.unfolded: Unfolded = {}
         self._rows: Optional[TreeRows] = None
@@ -241,7 +246,7 @@ class TreeColumn(Column):
     @property
     def tree(self):
         if self._root is None or self._version != self.node.version:
-            self._root = self.node.fmt.tree(self.node.data)
+            self._root = self.make_tree()
             self._version = self.node.version
             self._rows = None
         return self._root
@@ -282,20 +287,21 @@ class TreeColumn(Column):
         else:
             parts.append(("  ", None))
         if node.label is not None:
-            label = f"[{node.label}]" if isinstance(node.label, int) else node.label
-            parts.append((f"{label}: ", STYLES["key"]))
+            label = f"[{node.label}]" if isinstance(node.label, int) else getattr(node, "display_label", node.label)
+            parts.append((f"{label}{getattr(node, 'separator', ': ')}", STYLES["key"]))
         room = max(0, self.wrap - sum(len(text) for text, _ in parts))
         if editing:
             return self._field([Segment(text, style) for text, style in parts], room)
         if node.error:
             parts.append((f"{node.source(room)} ⚠ {node.error}", STYLES["error"]))
         elif node.container and rows.is_open(node):
-            opener = {"object": "{", "array": "[", "stream": ""}[node.kind]
+            opener = {"object": "{", "array": "["}.get(node.kind, "")
             noun = "keys" if node.kind == "object" else "items"
             parts.append((f"{opener} {node.count} {noun}", STYLES["summary"]))
         else:
             parts.append((node.source(room), STYLES.get(node.kind)))
-        if node.start in self._edited():
+        opening = node.opening()
+        if opening and opening[1].data_start in self._edited():
             parts.insert(-1, ("✎ ", STYLES["summary"]))
         segments = []
         used = 0

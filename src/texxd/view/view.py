@@ -37,7 +37,7 @@ from textual.scroll_view import ScrollView
 from textual.strip import Strip
 
 from ..data import Buffer, EditError, ResizeError
-from ..dialogs import ChoiceModal, EncodingModal, GoToOffsetModal
+from ..dialogs import ChoiceModal, GoToOffsetModal, PickModal
 from ..document import Document
 from ..formats import Format, Region
 from ..log import get_logger
@@ -53,7 +53,7 @@ from .highlight import (
     RangeHighlighter,
     StaleHighlighter,
 )
-from .registry import columns_for
+from .registry import HEX, View, text_in, views_for
 from .rows import ByteRows, Rows
 
 logger = get_logger(__name__)
@@ -66,13 +66,32 @@ HEADER_LINES = 1
 
 
 class Level:
-    """One node's columns in the strip."""
+    """A node in the strip, and the view of it that's showing.
 
-    def __init__(self, node: Node, origin: Optional[int] = None):
-        self.node = node
-        self.columns: list[Column] = columns_for(node)
+    ``base`` is the node the level is for: the root, or a region opened from
+    the level to its left. ``node`` is what its view shows: usually ``base``
+    itself, or the whole of it opened as some format (text, a JSON document).
+    """
+
+    def __init__(self, base: Node, origin: Optional[int] = None, view: Optional[View] = None):
+        self.base = base
         # the column of the level to the left that opened this one
         self.origin = origin
+        self.views = views_for(base)
+        for choice in [view] if view else self.views:
+            try:
+                self.show(choice)
+                return
+            except Exception:
+                logger.exception(f"couldn't show {base.name} as {choice.name}")
+        self.show(HEX)
+
+    def show(self, view: View) -> None:
+        """Switch to ``view``. Raises if it can't show this node."""
+        node = view.shown(self.base)
+        self.view = view
+        self.node = node
+        self.columns: list[Column] = view.columns(node)
         self.insert_mode = node.resizable and any(column.prefers_insert for column in self.columns)
 
     @property
@@ -98,8 +117,8 @@ class Level:
         return self.node.data.size
 
     @property
-    def base(self) -> Optional[int]:
-        """Where the node's byte 0 is in the root buffer, if its bytes are there."""
+    def root_offset(self) -> Optional[int]:
+        """Where the shown node's byte 0 is in the root buffer, if its bytes are there."""
         return self.node.data.to_root(0)
 
     @property
@@ -138,6 +157,7 @@ class HexView(ScrollView, can_focus=True):
         Binding("enter", "open", "Open"),
         Binding("escape", "close_level", "Close"),
         Binding("insert", "toggle_insert", "Ins/Ovr"),
+        Binding("f2", "choose_view", "View"),
         Binding("ctrl+g", "goto", "Go to"),
         Binding("ctrl+k", "commit", "Commit"),
     ]
@@ -148,6 +168,7 @@ class HexView(ScrollView, can_focus=True):
         "insert": "toggle_insert",
         "ctrl+g": "goto",
         "ctrl+k": "commit",
+        "f2": "choose_view",
         "enter": "open",
         "escape": "close_level",
         "ctrl+z": "app.undo",
@@ -162,9 +183,10 @@ class HexView(ScrollView, can_focus=True):
         self.document = document
         node = document.root
         self.levels = [Level(node)]
+        node = self.levels[0].node
         self.cursor = Cursor()
         # (level index, column index) of the column with the cursor; that level drives the rows
-        self.active = (0, 1)
+        self.active = (0, self.levels[0].default_column)
         # centre the cursor next time it has to scroll, for jumps
         self._center = False
         self.edits = EditHighlighter(node.data)
@@ -213,7 +235,7 @@ class HexView(ScrollView, can_focus=True):
         size = self.data.size
         pos = self.cursor.position
         mode = "INS" if self.insert_mode else "OVR"
-        path = " › ".join(f"[{lv.node.name}]" if lv is self.level else lv.node.name for lv in self.levels)
+        path = " › ".join(f"[{lv.base.name}]" if lv is self.level else lv.base.name for lv in self.levels)
         if size == 0:
             return f"{path} │ empty │ {mode}"
         percent = min(100, (pos + 1) * 100 // size)
@@ -280,7 +302,7 @@ class HexView(ScrollView, can_focus=True):
         """What to add to an offset in ``old`` to get the same byte in ``new``, if they line up."""
         if old is new:
             return 0
-        old_base, new_base = old.base, new.base
+        old_base, new_base = old.root_offset, new.root_offset
         if old_base is None or new_base is None:
             return None
         return old_base - new_base
@@ -323,9 +345,16 @@ class HexView(ScrollView, can_focus=True):
         self.refresh()
 
     def _fit_columns(self, bytes_per_line: int, available: int) -> None:
-        """Give the rightmost level's flexible columns the room left on screen."""
+        """Give the rightmost level's flexible columns the room left on screen.
+
+        Flexible columns further left are kept compact, to leave room for it.
+        """
         if not available:
             return
+        for level in self.levels[:-1]:
+            for column in level.columns:
+                if column.flexible:
+                    column.fit(max(column.min_width, available // 3))
         index = len(self.levels) - 1
         level = self.levels[index]
         if not level.flexible:
@@ -473,15 +502,17 @@ class HexView(ScrollView, can_focus=True):
         position = self.cursor.position
         try:
             child = self.node.child(fmt, region)
+            level = Level(child, origin)
         except Exception as e:
             logger.exception(f"couldn't open {region.name}")
             self.notify(f"Couldn't open {region.name}: {e}", severity="error")
             return
         del self.levels[index + 1 :]
-        self.levels.append(Level(child, origin))
+        self.levels.append(level)
         # stay on the same byte if it's in there
-        target = child.data.from_parent(position)
-        if target is None or target >= child.data.size:
+        root = self.data.to_root(position)
+        target = level.node.data.from_root(root) if root is not None else None
+        if target is None or target >= level.node.data.size:
             target = 0
         self.set_active(len(self.levels) - 1, self.levels[-1].default_column, target)
 
@@ -504,7 +535,7 @@ class HexView(ScrollView, can_focus=True):
         origin = self.levels[index + 1].origin
         kept = self.levels[index]
         shift = self._shift(old, kept)
-        position = self.cursor.position + shift if shift is not None else self.levels[index + 1].node.region.start
+        position = self.cursor.position + shift if shift is not None else self.levels[index + 1].base.region.start
         del self.levels[index + 1 :]
         if closing_active:
             # land in the column it was opened from, on the region we came out of
@@ -521,7 +552,9 @@ class HexView(ScrollView, can_focus=True):
         for index, level in enumerate(self.levels):
             if index:
                 segments.append(Segment(LEVEL_GAP, self.gap_style))
-            name = level.node.name + ("*" if index == 0 and modified else "")
+            name = level.base.name + ("*" if index == 0 and modified else "")
+            if len(level.views) > 1:
+                name += f" · {level.view.name} ▾"
             width = level.width(bytes_per_line)
             label = f" {name} "[:width]
             style = Style(bold=True, reverse=level is self.level)
@@ -788,8 +821,11 @@ class HexView(ScrollView, can_focus=True):
         level_index, column_index, column_x = hit
         level = self.levels[level_index]
         if event.y < HEADER_LINES:
-            # a level's name: move to it, on the same byte if it has it
-            self.set_active(level_index, level.default_column)
+            # a level's name: move to it, on the same byte if it has it; again, to choose its view
+            if level is self.level:
+                self.action_choose_view()
+            else:
+                self.set_active(level_index, level.default_column)
             return
 
         shift = self._shift(self.level, level)
@@ -837,31 +873,56 @@ class HexView(ScrollView, can_focus=True):
         self._cycle_column(-1)
 
     def choose_encoding(self) -> None:
-        """Ask which encoding to read the text level with the cursor as, and reopen it."""
+        """Ask which encoding to read the text in the level with the cursor as."""
         node = self.node
-        if node.parent is None or node.fmt is None or not hasattr(node.fmt, "using"):
-            return
-        if node.stale:
-            self.notify(f"{node.name} has edits: commit (^k) or undo them first", severity="warning")
+        if not hasattr(node.fmt, "using"):
             return
 
         def chosen(encoding: Optional[str]) -> None:
             if encoding:
-                self.reopen(node.fmt.using(encoding))
+                self.show_view(self.active[0], text_in(encoding))
 
-        self.app.push_screen(EncodingModal(node.fmt.encoding, node.fmt.suggestions(node.parent.data)), chosen)
+        encodings = node.fmt.suggestions(self.level.base.data)
+        self.app.push_screen(PickModal(f"Read as (now {node.fmt.encoding}):", encodings, node.fmt.encoding), chosen)
 
-    def reopen(self, fmt: type[Format]) -> None:
-        """Close the level with the cursor and open its region again with ``fmt``."""
-        index = self.active[0]
+    def action_choose_view(self) -> None:
+        """Ask how to look at the level with the cursor."""
+        level = self.level
+        level.views = views_for(level.base)
+        names = [view.name for view in level.views]
+
+        def chosen(name: Optional[str]) -> None:
+            if name:
+                self.show_view(self.active[0], level.views[names.index(name)])
+
+        self.app.push_screen(PickModal(f"View {level.base.name} as:", names, level.view.name), chosen)
+
+    def show_view(self, index: int, view: View) -> None:
+        """Look at level ``index`` a different way, keeping the cursor on the same byte where it can."""
         level = self.levels[index]
-        region = level.node.region
-        self.close_levels_after(index - 1)
-        found = next((r for r in self.node.regions(fmt) if r.start == region.start), None)
-        if found is None:
-            self.notify(f"{region.name} can't be read as {fmt.name}", severity="error")
+        try:
+            shown = view.shown(level.base)
+        except Exception as e:
+            self.notify(f"Can't show {level.base.name} as {view.name}: {e}", severity="error")
             return
-        self.open_region(fmt, found, level.origin if level.origin is not None else self.level.default_column)
+        if level.node.stale and shown is not level.node:
+            self.notify(f"{level.node.name} has edits: commit (^k) or undo them first", severity="warning")
+            return
+        root = self.level.node.data.to_root(self.cursor.position)
+        if shown is not level.node:
+            # what's open to the right was opened from what it showed before
+            self.close_levels_after(index)
+        level.show(view)
+        position = level.node.data.from_root(root) if root is not None else None
+        self.active = (index, level.default_column)
+        self.cursor.nibble = 0
+        self.edits.data = self.stale.data = self.data
+        self._update_layout()
+        self.cursor.set_position(position if position is not None else 0)
+        self._center = True
+        self._cursor_moved()
+        # once the new widths are in, so scrolling to it isn't cut short
+        self.call_after_refresh(self._scroll_to_cursor)
 
     def action_toggle_insert(self) -> None:
         if not self.node.resizable:

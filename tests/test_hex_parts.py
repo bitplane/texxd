@@ -6,8 +6,9 @@ from rich.style import Style
 from texxd.data import Buffer, BytesSource
 from texxd.formats.tar import Tar
 from texxd.node import Node
-from texxd.view.columns import AddressColumn, CursorCell, StructureColumn, HexColumn, TextColumn
+from texxd.view.columns import AddressColumn, CursorCell, HexColumn, TextColumn
 from texxd.view.cursor import Cursor
+from texxd.view.regions import RegionRoot
 from texxd.view.highlight import DataHighlighter, EditHighlighter, Highlights
 
 CURSOR = Style(bgcolor="white")
@@ -130,20 +131,15 @@ def test_cursor_wins_over_highlights():
     assert first.color.name == "black" and first.bgcolor.name == "bright_white"
 
 
-def test_structure_column_brackets():
+def test_region_listing():
     node = Node("t.tar", Buffer(BytesSource(make_tar({"dir": None, "a.txt": b"hello"}))))
-    col = StructureColumn(node, Tar)
-    width = col.width(16, node.data.size)
-
-    def row(offset):
-        out = text(col.render(offset, b"", [], 16, node.data.size, None))
-        assert len(out) == width
-        return out.rstrip()
-
-    assert row(0).startswith("┬ dir") and row(0).endswith("dir")
-    assert row(16) == "│"
-    assert row(496) == "└"
-    assert row(512).startswith("┬ a.txt") and row(512).endswith(" 5")
-    assert row(1520) == "└"
-    assert row(1536) == ""  # end of archive padding
-    assert col.region_for_line(520, 16).name == "a.txt"
+    root = RegionRoot(node, Tar)
+    assert root.hidden and root.count == 2
+    folder, file = root.children
+    assert (folder.label, folder.kind, folder.start, folder.opening()) == ("dir", "dir", 0, None)
+    assert (file.label, file.row_start, file.stop, file.path) == ("a.txt", 512, 1536, "a.txt")
+    assert file.display_label == "a.txt" and folder.display_label == "dir  "
+    assert file.source(40).startswith("     5  -rw-r--r--")
+    fmt, region = file.opening()
+    assert fmt is Tar and region.data_start == 1024
+    assert root.index_at(600) == 1 and root.find("dir") == 0
