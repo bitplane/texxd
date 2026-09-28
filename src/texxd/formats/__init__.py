@@ -104,9 +104,10 @@ class Binary(Format):
 
 def registry() -> list[type[Format]]:
     """All known formats."""
+    from .gzip import Gzip
     from .tar import Tar
 
-    return [Tar, Binary]
+    return [Gzip, Tar, Binary]
 
 
 def detect(data: Data) -> list[type[Format]]:
