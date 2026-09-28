@@ -3,11 +3,13 @@
 import tarfile
 
 import pytest
+from conftest import Reversed
 
 from texxd.app import TexxdApp
 from texxd.dialogs import ConfirmModal
+from texxd.formats import Binary
 from texxd.view import HexView
-from texxd.view.columns import EntriesColumn
+from texxd.view.columns import StructureColumn
 
 pytestmark = pytest.mark.asyncio
 
@@ -163,7 +165,7 @@ async def test_tar_column_selects_and_highlights(nested_tar):
             "AddressColumn",
             "HexColumn",
             "TextColumn",
-            "EntriesColumn",
+            "StructureColumn",
         ]
         # inner.tar's header is at 512, line 32: scroll so it's on the second row, then click its name
         view.scroll_to(y=31, animate=False, immediate=True)
@@ -179,7 +181,7 @@ async def test_tar_column_selects_and_highlights(nested_tar):
         # the hex rows of that entry are tinted
         styles = [None] * 16
         view.highlights.highlight(view.data.read(1024, 16), 1024, styles)
-        assert all(s.bgcolor == view.contents_style.bgcolor for s in styles)
+        assert all(s.bgcolor == StructureColumn.contents_style.bgcolor for s in styles)
         # down steps to the next entry, and clicking the hex drops the highlight
         await pilot.press("down")
         assert view.active_column.selected.name == "README"
@@ -210,12 +212,13 @@ async def test_drill_into_nested_tar_and_edit(nested_tar):
         await pilot.pause()
         assert [level.node.name for level in view.levels] == ["outer.tar", "inner.tar", "data.json"]
         assert view.data.read(0, 9) == b'{"a": 1}\n'
-        assert not any(isinstance(c, EntriesColumn) for c in view.level.columns)
+        assert not any(isinstance(c, StructureColumn) for c in view.level.columns)
 
         await pilot.press("tab", "X")
-        await pilot.press("delete")  # can't resize inside a tar
+        await pilot.press("delete")  # resizes it, and both tars are fixed up
+        await pilot.press("insert", *"!!")
         await pilot.pause()
-        assert view.data.size == 9
+        assert view.data.read(0, 20) == b'X!!a": 1}\n'
         await pilot.press("ctrl+s")
         await pilot.pause()
 
@@ -223,12 +226,12 @@ async def test_drill_into_nested_tar_and_edit(nested_tar):
         await pilot.press("escape")
         await pilot.pause()
         assert len(view.levels) == 2
-        assert isinstance(view.active_column, EntriesColumn)
+        assert isinstance(view.active_column, StructureColumn)
         assert view.active_column.selected.name == "data.json"
 
     with tarfile.open(nested_tar) as outer:
         inner = tarfile.open(fileobj=outer.extractfile("inner.tar"))
-        assert inner.extractfile("data.json").read() == b'X"a": 1}\n'
+        assert inner.extractfile("data.json").read() == b'X!!a": 1}\n'
 
 
 async def test_outer_levels_stay_open_and_scroll_their_whole_range(nested_tar):
@@ -267,7 +270,7 @@ async def test_outer_levels_stay_open_and_scroll_their_whole_range(nested_tar):
         await pilot.pause()
         await pilot.pause()
         assert view.active == (1, 1)
-        assert view.cursor.position == view.data.size - 1
+        assert view.cursor.position == view.data.size  # inner levels can be appended to too
 
 
 async def test_clicking_levels(nested_tar):
@@ -308,17 +311,80 @@ async def test_clicking_levels(nested_tar):
         assert view.active_column.selected.name == "inner.tar"
 
 
-async def test_level_closes_when_its_bytes_move(nested_tar):
+async def test_levels_follow_resizes_and_close_when_cut(nested_tar):
     app = TexxdApp(nested_tar)
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         view = hex_view(app)
-        # an insert inside inner.tar's padding, before opening it
-        app.buffer.insert(5000, b"\0")
         await pilot.press("tab", "tab", "down", "enter")
         await pilot.pause()
         assert len(view.levels) == 2
-        # undoing it moves bytes inside the open level
-        await pilot.press("ctrl+z")
+        # an edit before the open level moves it, one inside resizes it
+        app.buffer.insert(0, b"\0")
+        app.buffer.insert(5000, b"\0")
+        await pilot.pause()
+        assert len(view.levels) == 2
+        assert view.levels[1].base == 1025 and view.data.size == 10241
+        # one across its edge loses track of its bytes, so it closes
+        app.buffer.delete(1000, 100)
         await pilot.pause()
         assert len(view.levels) == 1
+
+
+async def test_derived_level_does_not_line_up(tmp_path, monkeypatch):
+    monkeypatch.setattr("texxd.formats.registry", lambda: [Reversed, Binary])
+    path = tmp_path / "rev.bin"
+    path.write_bytes(b"REV" + bytes(range(64)))
+    app = TexxdApp(path)
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        view = hex_view(app)
+        assert isinstance(view.level.columns[3], StructureColumn)
+        await pilot.press("tab", "tab", "enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert view.active == (1, 1)
+        assert view.levels[1].base is None
+        assert view.data.read(0, 2) == b"\x3f\x3e"
+        # the outer level is blank while the derived one drives the rows, and clicks on it do nothing
+        view.scroll_to(x=0, animate=False, immediate=True)
+        await pilot.pause()
+        assert view.render_line(1).text.startswith(" " * 20)
+        await pilot.click(HexView, offset=(10, 1))
+        assert view.active == (1, 1)
+        # going back out lands on the region it was opened from
+        await pilot.press("escape")
+        await pilot.pause()
+        assert view.active == (0, 3)
+        assert view.cursor.position == 0
+        assert view.render_line(1).text.startswith("0000: 52 45 56")
+
+
+async def test_derived_edits_undo_and_save(tmp_path, monkeypatch):
+    monkeypatch.setattr("texxd.formats.registry", lambda: [Reversed, Binary])
+    path = tmp_path / "rev.bin"
+    path.write_bytes(b"REV" + b"olleh")
+    app = TexxdApp(path)
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        view = hex_view(app)
+        await pilot.press("tab", "tab", "enter")
+        await pilot.pause()
+        await pilot.press("tab", "J")
+        await pilot.pause()
+        assert view.data.read(0, 5) == b"Jello"
+        # the edit is the document's, though the file itself hasn't changed yet
+        assert app.document.modified and not app.buffer.modified
+        header = "".join(segment.text for segment in view._render_header(view.cursor.bytes_per_line))
+        assert "rev.bin*" in header
+        # undo from the outer level goes back in to show it
+        await pilot.press("shift+tab", "shift+tab", "shift+tab")
+        await pilot.pause()
+        assert len(view.levels) == 2 and view.active[0] == 0
+        await pilot.press("ctrl+z")
+        await pilot.pause()
+        assert view.active[0] == 1 and view.data.read(0, 5) == b"hello"
+        await pilot.press("ctrl+y", "ctrl+s")
+        await pilot.pause()
+        assert path.read_bytes() == b"REV" + b"olleJ"
+        assert not app.document.modified

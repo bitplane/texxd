@@ -200,10 +200,12 @@ def test_window_reads_and_writes_through():
     assert contents(buf) == b"0123x56789"
     assert win.edits(0, 4) == [(1, 2)]
     assert win.root is buf
-    with pytest.raises(ResizeError):
-        win.write(3, b"ab")
-    with pytest.raises(ResizeError):
-        win.insert(0, b"a")
+    # writing past the end extends the window, moving what's after it
+    win.write(3, b"ab")
+    assert contents(buf) == b"0123x5ab789"
+    assert win.size == 5
+    buf.undo()
+    assert contents(buf) == b"0123x56789" and win.size == 4
 
 
 def test_window_follows_parent_resizes():
@@ -222,5 +224,120 @@ def test_window_follows_parent_resizes():
     buf.undo()
     buf.undo()
     assert win.valid and win.start == 5
-    buf.insert(6, b"!")  # inside the window
+    buf.insert(6, b"!")  # inside the window: it grows
+    assert win.read(0, 10) == b"5!67"
+    buf.delete(4, 2)  # across its start: it can't tell where its bytes went
     assert not win.valid
+
+
+def test_window_edges():
+    buf = make()
+    win = Window(buf, 3, 4)  # "3456"
+    buf.insert(3, b"<")  # at its start, not through it: it moves
+    buf.insert(8, b">")  # at its end, not through it: it doesn't grow
+    assert win.read(0, 10) == b"3456" and win.start == 4
+    win.insert(0, b"[")
+    win.insert(5, b"]")
+    assert win.read(0, 10) == b"[3456]"
+    assert contents(buf) == b"012<[3456]>789"
+    # undoing a delete at the end puts the bytes back in the window, not after it
+    win.delete(5, 1)
+    assert win.read(0, 10) == b"[3456"
+    buf.undo()
+    assert win.read(0, 10) == b"[3456]"
+
+
+def test_nested_windows_resize_together():
+    buf = make()
+    outer = Window(buf, 2, 6)  # "234567"
+    inner = Window(outer, 4, 2)  # "67", at the end of outer
+    inner.insert(2, b"xy")
+    assert inner.read(0, 10) == b"67xy"
+    assert outer.read(0, 10) == b"234567xy"
+    assert contents(buf) == b"01234567xy89"
+    inner.delete(0, 3)
+    assert contents(buf) == b"012345y89"
+    assert outer.read(0, 10) == b"2345y" and inner.read(0, 10) == b"y"
+
+
+def test_fixed_parent_refuses_resizes():
+    class Fixed(Buffer):
+        resizable = False
+
+    win = Window(Fixed(BytesSource(b"0123")), 1, 2)
+    with pytest.raises(ResizeError):
+        win.insert(0, b"a")
+    with pytest.raises(ResizeError):
+        win.delete(0, 1)
+
+
+def test_transaction_is_one_undo_step():
+    buf = make()
+    with buf.transaction():
+        buf.write(0, b"a")
+        buf.insert(1, b"b")
+        buf.delete(5, 2)
+    assert contents(buf) == b"ab1236789"
+    change = buf.undo()
+    assert contents(buf) == b"0123456789"
+    assert change == Change(0, 1, 1)
+    assert not buf.can_undo
+    buf.redo()
+    assert contents(buf) == b"ab1236789"
+
+
+def test_transaction_rolls_back_on_error():
+    buf = make()
+    buf.write(0, b"a")
+    buf.undo()
+    win = Window(buf, 4, 2)
+    with pytest.raises(ValueError):
+        with buf.transaction():
+            buf.insert(0, b"xx")
+            buf.write(9, b"!")
+            raise ValueError()
+    assert contents(buf) == b"0123456789"
+    assert win.start == 4 and win.valid
+    assert not buf.can_undo and buf.can_redo  # the failed edit didn't lose the redo
+    assert not buf.modified
+
+
+def test_deferred_work_runs_highest_priority_first_and_can_edit():
+    buf = make()
+    ran = []
+
+    def outer():
+        ran.append("outer")
+        buf.write(0, b"O")
+
+    def inner():
+        ran.append("inner")
+        buf.write(1, b"I")
+        buf.defer("outer", 1, outer)  # queued again: still only runs once, after this
+
+    with buf.transaction():
+        buf.write(9, b"!")
+        buf.defer("outer", 1, outer)
+        buf.defer("inner", 2, inner)
+    assert ran == ["inner", "outer"]
+    assert contents(buf) == b"OI2345678!"
+    buf.undo()
+    assert contents(buf) == b"0123456789"
+    buf.defer("ignored", 1, outer)  # outside a transaction
+    assert ran == ["inner", "outer"]
+
+
+def test_failing_deferred_work_rolls_back():
+    buf = make()
+
+    def fail():
+        raise ResizeError("no")
+
+    with pytest.raises(ResizeError):
+        with buf.transaction():
+            buf.insert(0, b"x")
+            buf.defer("fail", 1, fail)
+    assert contents(buf) == b"0123456789"
+    buf.write(0, b"y")  # the next edit starts afresh
+    buf.undo()
+    assert contents(buf) == b"0123456789"

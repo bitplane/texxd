@@ -13,6 +13,10 @@ from ..data import Data
 
 Styles = List[Optional[Style]]
 
+# the cursor, or a selection, in the focused column, and anywhere else
+ACTIVE_STYLE = Style(bgcolor="bright_white", color="black")
+INACTIVE_STYLE = Style(bgcolor="grey35", color="grey93")
+
 
 def combine(existing: Optional[Style], new: Style) -> Style:
     """Layer ``new`` on top of ``existing``."""

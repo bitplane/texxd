@@ -6,7 +6,7 @@ from rich.style import Style
 from texxd.data import Buffer, BytesSource
 from texxd.formats.tar import Tar
 from texxd.node import Node
-from texxd.view.columns import AddressColumn, CursorCell, EntriesColumn, HexColumn, TextColumn
+from texxd.view.columns import AddressColumn, CursorCell, StructureColumn, HexColumn, TextColumn
 from texxd.view.cursor import Cursor
 from texxd.view.highlight import DataHighlighter, EditHighlighter, Highlights
 
@@ -130,9 +130,9 @@ def test_cursor_wins_over_highlights():
     assert first.color.name == "black" and first.bgcolor.name == "bright_white"
 
 
-def test_entries_column_brackets():
+def test_structure_column_brackets():
     node = Node("t.tar", Buffer(BytesSource(make_tar({"dir": None, "a.txt": b"hello"}))))
-    col = EntriesColumn(node, Tar)
+    col = StructureColumn(node, Tar)
     width = col.width(16, node.data.size)
 
     def row(offset):
@@ -146,4 +146,4 @@ def test_entries_column_brackets():
     assert row(512).startswith("┬ a.txt") and row(512).endswith(" 5")
     assert row(1520) == "└"
     assert row(1536) == ""  # end of archive padding
-    assert col.entry_for_line(520, 16).name == "a.txt"
+    assert col.region_for_line(520, 16).name == "a.txt"

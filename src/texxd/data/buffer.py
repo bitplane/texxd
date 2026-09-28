@@ -4,18 +4,22 @@
 of pieces, each pointing into either the original source or an append-only
 buffer of added bytes. Nothing is copied until save.
 
-``Window`` is a fixed-size view onto part of another buffer. Reads and writes
-go straight through to the parent, so all edits live in the root buffer and
-saving the root saves everything.
+``Window`` is a view onto part of another buffer. Reads and edits go straight
+through to the parent, so all edits live in the root buffer and saving the
+root saves everything.
+
+Edits happen in transactions, and undo steps are kept in a History; see
+history.py.
 """
 
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, ContextManager, Optional, Tuple
 
+from .history import History
 from .rangemap import RangeMap
 from .source import BytesSource, FileSource, Source
 
@@ -34,12 +38,14 @@ class Change:
     """Describes an edit: ``removed`` bytes at ``offset`` were replaced by ``inserted`` bytes.
 
     An overwrite has removed == inserted, an insert has removed == 0 and a
-    delete has inserted == 0.
+    delete has inserted == 0. ``origin`` is the data the edit was made through,
+    so a window can tell its own inserts at its edges from its neighbours'.
     """
 
     offset: int
     removed: int
     inserted: int
+    origin: Optional["Data"] = field(default=None, compare=False, repr=False)
 
     @property
     def delta(self) -> int:
@@ -48,16 +54,34 @@ class Change:
 
     def inverse(self) -> "Change":
         """The change that undoes this one."""
-        return Change(self.offset, self.inserted, self.removed)
+        return Change(self.offset, self.inserted, self.removed, self.origin)
+
+    def made_through(self, data: "Data") -> bool:
+        """True if the edit was made through ``data``, or something derived from it."""
+        origin = self.origin
+        while origin is not None:
+            if origin is data:
+                return True
+            origin = origin.parent
+        return False
 
 
 Listener = Callable[[Change], None]
 
 
 class Data:
-    """Interface shared by everything a view can display and edit."""
+    """Interface shared by everything a view can display and edit.
+
+    Data can be derived from a parent: ``to_parent`` and ``from_parent`` map
+    offsets between the two where the bytes correspond one to one, and return
+    None where they don't (outside the region, or for transformed data like a
+    decompressed stream).
+    """
 
     resizable = False
+    parent: Optional["Data"] = None
+    # False once the bytes this was derived from have moved out from under it
+    valid = True
 
     def __init__(self) -> None:
         self._listeners: list[Listener] = []
@@ -75,21 +99,53 @@ class Data:
         """Read up to ``size`` bytes from ``offset``."""
         raise NotImplementedError()
 
-    def write(self, offset: int, data: bytes) -> None:
-        """Overwrite bytes at ``offset``."""
+    def write(self, offset: int, data: bytes, origin: Optional["Data"] = None) -> None:
+        """Overwrite bytes at ``offset``. ``origin`` is the data the edit is being made through."""
         raise NotImplementedError()
 
-    def insert(self, offset: int, data: bytes) -> None:
+    def insert(self, offset: int, data: bytes, origin: Optional["Data"] = None) -> None:
         """Insert bytes at ``offset``, moving everything after it."""
         raise ResizeError("can't insert here")
 
-    def delete(self, offset: int, size: int) -> None:
+    def delete(self, offset: int, size: int, origin: Optional["Data"] = None) -> None:
         """Remove ``size`` bytes at ``offset``."""
         raise ResizeError("can't delete here")
 
     def edits(self, start: int, stop: int) -> list[Tuple[int, int]]:
         """Ranges within [start, stop) that have unsaved changes."""
         raise NotImplementedError()
+
+    def to_parent(self, offset: int) -> Optional[int]:
+        """Where byte ``offset`` is in the parent, if it maps there directly."""
+        return None
+
+    def from_parent(self, offset: int) -> Optional[int]:
+        """Where the parent's byte ``offset`` is in this data, if it maps here directly."""
+        return None
+
+    def to_root(self, offset: int) -> Optional[int]:
+        """Where byte ``offset`` is in the root buffer, if it maps there directly."""
+        data = self
+        while data.parent is not None:
+            offset = data.to_parent(offset)
+            if offset is None:
+                return None
+            data = data.parent
+        return offset
+
+    def from_root(self, offset: int) -> Optional[int]:
+        """Where the root buffer's byte ``offset`` is in this data, if it maps here directly."""
+        if self.parent is None:
+            return offset
+        offset = self.parent.from_root(offset)
+        return None if offset is None else self.from_parent(offset)
+
+    def from_buffer(self, offset: int) -> Optional[int]:
+        """Where byte ``offset`` of the buffer holding this data's edits is in this data, if it maps here."""
+        if self is self.root:
+            return offset
+        offset = self.parent.from_buffer(offset)
+        return None if offset is None else self.from_parent(offset)
 
     def subscribe(self, listener: Listener) -> None:
         """Call ``listener`` with a Change whenever the contents change."""
@@ -112,34 +168,27 @@ def _adjust_piece(piece: Tuple[int, int], moved: int) -> Tuple[int, int]:
     return source, delta - moved
 
 
-@dataclass
-class _Step:
-    """One undoable edit: the state before it, and what it changed."""
-
-    pieces: RangeMap
-    size: int
-    version: int
-    change: Change
-
-
 class Buffer(Data):
     """A resizable piece table over a Source, with undo."""
 
     resizable = True
 
-    def __init__(self, source: Optional[Source] = None):
+    def __init__(self, source: Optional[Source] = None, parent: Optional[Data] = None):
         super().__init__()
+        # set for a buffer holding data derived from another, like a decompressed
+        # stream: its offsets don't map to the parent's, and it keeps its own edits
+        self.parent = parent
         self._source = source if source is not None else BytesSource()
         self._added = bytearray()
         self._pieces = RangeMap(_adjust_piece)
         self._size = self._source.size
         if self._size:
             self._pieces[0 : self._size] = (ORIGINAL, 0)
-        self._undo: list[_Step] = []
-        self._redo: list[_Step] = []
         self._version = 0
         self._next_version = 1
         self._saved_version = 0
+        # derived data shares its history with the data it came from
+        self.history: History = parent.root.history if parent is not None else History()
 
     @classmethod
     def open(cls, path: Path) -> "Buffer":
@@ -163,13 +212,17 @@ class Buffer(Data):
         """True if there are unsaved changes."""
         return self._version != self._saved_version
 
+    def mark_saved(self) -> None:
+        """Count the contents as they are now as saved, like once derived data is written back."""
+        self._saved_version = self._version
+
     @property
     def can_undo(self) -> bool:
-        return bool(self._undo)
+        return self.history.can_undo
 
     @property
     def can_redo(self) -> bool:
-        return bool(self._redo)
+        return self.history.can_redo
 
     def read(self, offset: int, size: int) -> bytes:
         stop = min(offset + size, self._size)
@@ -185,12 +238,29 @@ class Buffer(Data):
                 out += self._added[lo:hi]
         return bytes(out)
 
-    def _record(self, change: Change) -> None:
-        """Snapshot the current state so the edit about to happen can be undone."""
-        self._undo.append(_Step(self._pieces.copy(), self._size, self._version, change))
-        self._redo.clear()
+    def transaction(self) -> ContextManager[None]:
+        """Group edits into one undo step; see History.transaction."""
+        return self.history.transaction()
+
+    def defer(self, key: Any, priority: int, work: Callable[[], None]) -> None:
+        """Run ``work`` before the current transaction finishes; see History.defer."""
+        self.history.defer(key, priority, work)
+
+    def _state(self) -> tuple:
+        return self._pieces, self._size, self._version, self._saved_version
+
+    def _restore(self, state: tuple) -> None:
+        self._pieces, self._size, self._version, self._saved_version = state
+
+    def _begin_step(self) -> tuple:
+        """A step is about to edit this buffer: returns the state to go back to, and bumps the version."""
+        state = (self._pieces.copy(), self._size, self._version, self._saved_version)
         self._version = self._next_version
         self._next_version += 1
+        return state
+
+    def _record(self, change: Change) -> None:
+        self.history.record(self, change)
 
     def _add(self, offset: int, data: bytes) -> None:
         """Append data to the add buffer and map [offset, offset + len) onto it."""
@@ -198,61 +268,53 @@ class Buffer(Data):
         self._added += data
         self._pieces[offset : offset + len(data)] = (ADDED, where - offset)
 
-    def write(self, offset: int, data: bytes) -> None:
+    def write(self, offset: int, data: bytes, origin: Optional[Data] = None) -> None:
         """Overwrite bytes at ``offset``. Writing past the end extends the buffer."""
         if not data:
             return
         if offset < 0 or offset > self._size:
             raise IndexError(f"write at {offset} outside buffer of size {self._size}")
         replaced = min(len(data), self._size - offset)
-        change = Change(offset, replaced, len(data))
-        self._record(change)
-        self._add(offset, data)
-        self._size = max(self._size, offset + len(data))
-        self._emit(change)
+        change = Change(offset, replaced, len(data), origin)
+        with self.transaction():
+            self._record(change)
+            self._add(offset, data)
+            self._size = max(self._size, offset + len(data))
+            self._emit(change)
 
-    def insert(self, offset: int, data: bytes) -> None:
+    def insert(self, offset: int, data: bytes, origin: Optional[Data] = None) -> None:
         if not data:
             return
         if offset < 0 or offset > self._size:
             raise IndexError(f"insert at {offset} outside buffer of size {self._size}")
-        change = Change(offset, 0, len(data))
-        self._record(change)
-        self._pieces.shift(offset, len(data))
-        self._add(offset, data)
-        self._size += len(data)
-        self._emit(change)
+        change = Change(offset, 0, len(data), origin)
+        with self.transaction():
+            self._record(change)
+            self._pieces.shift(offset, len(data))
+            self._add(offset, data)
+            self._size += len(data)
+            self._emit(change)
 
-    def delete(self, offset: int, size: int) -> None:
+    def delete(self, offset: int, size: int, origin: Optional[Data] = None) -> None:
         size = min(size, self._size - offset)
         if size <= 0 or offset < 0:
             return
-        change = Change(offset, size, 0)
-        self._record(change)
-        self._pieces.shift(offset, -size)
-        self._size -= size
-        self._emit(change)
+        change = Change(offset, size, 0, origin)
+        with self.transaction():
+            self._record(change)
+            self._pieces.shift(offset, -size)
+            self._size -= size
+            self._emit(change)
 
     def undo(self) -> Optional[Change]:
-        """Undo the last edit. Returns the change it made, or None if there was nothing to undo."""
-        if not self._undo:
-            return None
-        step = self._undo.pop()
-        self._redo.append(_Step(self._pieces, self._size, self._version, step.change))
-        self._pieces, self._size, self._version = step.pieces, step.size, step.version
-        change = step.change.inverse()
-        self._emit(change)
-        return change
+        """Undo the last step. Returns the change it started with, undone, or None if there was nothing to undo."""
+        where = self.history.undo()
+        return where and where[1]
 
     def redo(self) -> Optional[Change]:
-        """Redo the last undone edit. Returns the change it made, or None."""
-        if not self._redo:
-            return None
-        step = self._redo.pop()
-        self._undo.append(_Step(self._pieces, self._size, self._version, step.change))
-        self._pieces, self._size, self._version = step.pieces, step.size, step.version
-        self._emit(step.change)
-        return step.change
+        """Redo the last undone step. Returns the change it started with, or None."""
+        where = self.history.redo()
+        return where and where[1]
 
     def edits(self, start: int, stop: int) -> list[Tuple[int, int]]:
         out = []
@@ -301,11 +363,10 @@ class Buffer(Data):
         self._pieces.clear()
         if self._size:
             self._pieces[0 : self._size] = (ORIGINAL, 0)
-        # history points into the old source, which is gone now
-        self._undo.clear()
-        self._redo.clear()
-        self._saved_version = self._version
+        self.mark_saved()
         self._emit(Change(0, self._size, self._size))
+        # history points into the old source, which is gone now
+        self.history.clear()
 
     def _rewrite(self, path: Path) -> None:
         """Write a whole new file next to ``path`` then move it into place."""
@@ -335,12 +396,13 @@ class Buffer(Data):
 
 
 class Window(Data):
-    """A fixed-size view of part of another buffer.
+    """A view of part of another buffer.
 
-    Overwrites pass straight through to the parent. If the parent is resized
-    in a way that moves the window's bytes around, the window follows; if the
-    resize happens inside the window it can't know where its bytes went, so it
-    becomes invalid.
+    Edits pass straight through to the parent. The window follows its bytes
+    when the parent changes: edits before it move it, edits inside it grow or
+    shrink it. An insert right at one of its edges belongs to it only if it was
+    made through it. If an edit straddles an edge the window can't tell where
+    its bytes went, so it becomes invalid.
     """
 
     def __init__(self, parent: Data, start: int, size: int):
@@ -356,6 +418,10 @@ class Window(Data):
         return self._size
 
     @property
+    def resizable(self) -> bool:
+        return self.parent.resizable
+
+    @property
     def root(self) -> Buffer:
         return self.parent.root
 
@@ -365,10 +431,38 @@ class Window(Data):
             return b""
         return self.parent.read(self.start + offset, size)
 
-    def write(self, offset: int, data: bytes) -> None:
-        if offset < 0 or offset + len(data) > self._size:
-            raise ResizeError("can't write past the end of a fixed-size region")
-        self.parent.write(self.start + offset, data)
+    def write(self, offset: int, data: bytes, origin: Optional[Data] = None) -> None:
+        """Overwrite bytes at ``offset``. Writing past the end extends the window."""
+        if offset < 0 or offset > self._size:
+            raise IndexError(f"write at {offset} outside window of size {self._size}")
+        inside, rest = data[: self._size - offset], data[self._size - offset :]
+        with self.root.transaction():
+            if inside:
+                self.parent.write(self.start + offset, inside, origin or self)
+            if rest:
+                self.insert(offset + len(inside), rest, origin)
+
+    def insert(self, offset: int, data: bytes, origin: Optional[Data] = None) -> None:
+        if not 0 <= offset <= self._size:
+            raise IndexError(f"insert at {offset} outside window of size {self._size}")
+        if not self.resizable:
+            raise ResizeError("can't insert here")
+        self.parent.insert(self.start + offset, data, origin or self)
+
+    def delete(self, offset: int, size: int, origin: Optional[Data] = None) -> None:
+        size = min(size, self._size - offset)
+        if size <= 0 or offset < 0:
+            return
+        if not self.resizable:
+            raise ResizeError("can't delete here")
+        self.parent.delete(self.start + offset, size, origin or self)
+
+    def to_parent(self, offset: int) -> Optional[int]:
+        return self.start + offset if 0 <= offset <= self._size else None
+
+    def from_parent(self, offset: int) -> Optional[int]:
+        offset -= self.start
+        return offset if 0 <= offset <= self._size else None
 
     def edits(self, start: int, stop: int) -> list[Tuple[int, int]]:
         stop = min(stop, self._size)
@@ -376,16 +470,23 @@ class Window(Data):
         return [(lo - self.start, hi - self.start) for lo, hi in edits]
 
     def _on_parent_change(self, change: Change) -> None:
-        end = self.start + self._size
+        if not self.valid:
+            return
+        start, end = self.start, self.start + self._size
+        lo, hi = change.offset, change.offset + change.removed
         if change.delta == 0:
-            lo = max(change.offset, self.start)
-            hi = min(change.offset + change.removed, end)
+            lo, hi = max(lo, start), min(hi, end)
             if lo < hi:
-                self._emit(Change(lo - self.start, hi - lo, hi - lo))
-        elif change.offset + change.removed <= self.start:
+                self._emit(Change(lo - start, hi - lo, hi - lo, change.origin))
+            return
+        ours = change.made_through(self)
+        if hi < start or (hi == start and (lo < start or not ours)):
             self.start += change.delta
-        elif change.offset >= end:
+        elif lo > end or (lo == end and (hi > end or not ours)):
             pass
+        elif start <= lo and hi <= end:
+            self._size += change.delta
+            self._emit(Change(lo - start, change.removed, change.inserted, change.origin))
         else:
             self.valid = False
-            self._emit(Change(0, self._size, self._size))
+            self._emit(Change(0, self._size, self._size, change.origin))

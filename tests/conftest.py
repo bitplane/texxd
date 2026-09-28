@@ -2,8 +2,12 @@
 
 import io
 import tarfile
+from dataclasses import replace
 
 import pytest
+
+from texxd.data import Buffer, BytesSource
+from texxd.formats import Format, Region
 
 
 def make_tar(files: dict) -> bytes:
@@ -32,3 +36,32 @@ def nested_tar(tmp_path):
     path = tmp_path / "outer.tar"
     path.write_bytes(outer)
     return path
+
+
+class Reversed(Format):
+    """A made up format: "REV" then a payload stored backwards, which opens as derived data."""
+
+    name = "reversed"
+    has_regions = True
+    can_resize = True
+
+    @classmethod
+    def sniff(cls, data):
+        return 0.95 if data.read(0, 3) == b"REV" else 0.0
+
+    @classmethod
+    def regions(cls, data):
+        return [Region("payload", 0, data.size, 3, data.size - 3, openable=True)]
+
+    @classmethod
+    def open(cls, data, region):
+        return Buffer(BytesSource(data.read(region.data_start, region.data_size)[::-1]), parent=data)
+
+    @classmethod
+    def encode(cls, data, region, contents):
+        return contents.read(0, contents.size)[::-1]
+
+    @classmethod
+    def fixup(cls, data, region, size):
+        # nothing records the size: the payload runs to the end
+        return replace(region, stop=region.data_start + size, data_size=size)

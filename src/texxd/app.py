@@ -11,10 +11,10 @@ from textual.screen import ModalScreen
 from textual.widgets import Footer, Static
 
 from . import __version__
-from .data import Buffer
+from .data import Buffer, Change, ResizeError
 from .dialogs import ConfirmModal
+from .document import Document
 from .log import setup_logging
-from .node import Node
 from .view import HexView, LocationChanged
 
 
@@ -44,20 +44,15 @@ class TexxdApp(App):
 
     def __init__(self, file_path: Optional[Path] = None):
         super().__init__()
-        self.file_path = file_path
-        if file_path and file_path.exists():
-            self.node = Node.open(file_path)
-        else:
-            # new file: nothing on disk until it's saved
-            self.node = Node(file_path.name if file_path else "untitled", Buffer())
+        self.document = Document.open(file_path)
 
     def compose(self) -> ComposeResult:
-        yield HexView(self.node)
+        yield HexView(self.document)
         yield StatusBar()
         yield Footer()
 
     def on_mount(self) -> None:
-        self.sub_title = self.node.name
+        self.sub_title = self.document.name
         self.query_one(HexView).focus()
 
     def on_location_changed(self, message: LocationChanged) -> None:
@@ -71,10 +66,10 @@ class TexxdApp(App):
 
     @property
     def buffer(self) -> Buffer:
-        return self.node.buffer
+        return self.document.buffer
 
     def action_quit(self) -> None:
-        if self.buffer.modified:
+        if self.document.modified:
 
             def answer(quit: bool | None) -> None:
                 if quit:
@@ -85,31 +80,30 @@ class TexxdApp(App):
             self.exit()
 
     def action_save(self) -> None:
-        if self.file_path is None:
+        if self.document.path is None:
             self.notify("No file name to save to (start texxd with one)", severity="warning")
             return
         try:
-            self.buffer.save(self.file_path)
-        except OSError as e:
+            self.document.save()
+        except (OSError, ResizeError, NotImplementedError) as e:
             self.notify(f"Save failed: {e}", severity="error")
             return
-        self.notify(f"Saved {self.file_path}")
+        self.notify(f"Saved {self.document.path}")
 
-    def _after_history(self, change) -> None:
+    def _after_history(self, where: Optional[tuple[Buffer, Optional[Change]]]) -> None:
         """Move the cursor to where an undo or redo happened."""
-        if change is None:
+        if where is None:
             self.notify("Nothing to do", severity="information")
             return
-        view = self.query_one(HexView)
-        offset = view.node.local_offset(change.offset)
-        if offset is not None:
-            view.go_to(offset)
+        buffer, change = where
+        if change is not None:
+            self.query_one(HexView).reveal(buffer, change.offset)
 
     def action_undo(self) -> None:
-        self._after_history(self.buffer.undo())
+        self._after_history(self.document.undo())
 
     def action_redo(self) -> None:
-        self._after_history(self.buffer.redo())
+        self._after_history(self.document.redo())
 
 
 def main() -> None:

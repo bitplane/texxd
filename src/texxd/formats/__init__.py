@@ -1,28 +1,30 @@
 """Format detection and structure.
 
-A Format recognises a kind of data and can describe its structure as a list of
-entries, some of which can be opened as child nodes.
+A Format recognises a kind of data and describes its structure as a tree of
+regions. Some regions can be opened, giving the data for a child node.
 """
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
-from ..data import Data
+from ..data import Data, ResizeError, Window
 
 
 @dataclass(frozen=True)
-class Entry:
-    """A named region inside some data, like a file in an archive.
+class Region:
+    """A named range of some data, like a file in an archive or a field in a header.
 
     Attributes:
         name: Display name.
-        start: Offset of the entry's whole region, including any header.
+        start: Offset of the whole region, including any header.
         stop: End of the whole region.
-        data_start: Offset of the entry's contents.
-        data_size: Size of the entry's contents.
+        data_start: Offset of the region's contents (after its header).
+        data_size: Size of the region's contents.
         kind: Short description, like "file" or "dir".
         openable: True if the contents can be opened as a child node.
+        value: The decoded value, for fields.
         info: Extra format-specific columns for display.
+        children: Regions nested inside this one, in order.
     """
 
     name: str
@@ -31,11 +33,17 @@ class Entry:
     data_start: int
     data_size: int
     kind: str = "file"
-    openable: bool = True
+    openable: bool = False
+    value: Any = None
     info: tuple = ()
+    children: tuple["Region", ...] = field(default=(), compare=False)
+
+    @property
+    def data_stop(self) -> int:
+        return self.data_start + self.data_size
 
     def contains(self, offset: int) -> bool:
-        """True if ``offset`` falls within this entry's whole region."""
+        """True if ``offset`` falls within the whole region."""
         return self.start <= offset < self.stop
 
 
@@ -43,8 +51,10 @@ class Format:
     """Base class for formats."""
 
     name = "binary"
-    # True if entries() describes structure worth showing in its own column
-    has_entries = False
+    # True if regions() describes structure worth showing
+    has_regions = False
+    # True if fixup() can cope with an opened region's contents changing size
+    can_resize = False
 
     @classmethod
     def sniff(cls, data: Data) -> float:
@@ -52,9 +62,34 @@ class Format:
         return 0.0
 
     @classmethod
-    def entries(cls, data: Data) -> list[Entry]:
-        """Parse the structure into entries. Formats without structure return []."""
+    def regions(cls, data: Data) -> list[Region]:
+        """Parse the structure into top level regions, in order. Formats without structure return []."""
         return []
+
+    @classmethod
+    def open(cls, data: Data, region: Region) -> Data:
+        """The data for an openable region: by default, its contents, in place."""
+        return Window(data, region.data_start, region.data_size)
+
+    @classmethod
+    def fixup(cls, data: Data, region: Region, size: int) -> Region:
+        """An opened region's contents are now ``size`` bytes: fix up whatever depends on that.
+
+        ``region`` is the region as it was, at its current position, so its
+        ``data_size`` is the old size; its contents already have the new one.
+        Edits ``data`` as needed (headers, padding) and returns the region as it
+        is now. Raises ResizeError if it can't, which rolls the edit back.
+        """
+        raise ResizeError(f"{cls.name} can't resize its contents")
+
+    @classmethod
+    def encode(cls, data: Data, region: Region, contents: Data) -> bytes:
+        """The bytes to write over ``region``'s contents in ``data`` for edited derived ``contents``.
+
+        Only needed by formats whose open() gives derived data, like a
+        decompressed stream. ``region`` is where the contents are now.
+        """
+        raise NotImplementedError(f"{cls.name} can't write back edited contents")
 
 
 class Binary(Format):

@@ -3,14 +3,18 @@
 import stat
 import tarfile
 import time
+from dataclasses import replace
 
-from ..data import Data, DataReader
+from ..data import Data, DataReader, ResizeError
 from ..log import get_logger
-from . import Entry, Format
+from . import Format, Region
 
 logger = get_logger(__name__)
 
 BLOCK = 512
+# where the size and checksum fields are in a header
+SIZE_FIELD = slice(124, 136)
+CHECKSUM_FIELD = slice(148, 156)
 
 FILE_TYPES = {
     tarfile.DIRTYPE: stat.S_IFDIR,
@@ -37,7 +41,8 @@ class Tar(Format):
     """A tar archive: a series of 512 byte headers, each followed by the file's data."""
 
     name = "tar"
-    has_entries = True
+    has_regions = True
+    can_resize = True
 
     @classmethod
     def sniff(cls, data: Data) -> float:
@@ -54,7 +59,7 @@ class Tar(Format):
         return 0.6
 
     @classmethod
-    def entries(cls, data: Data) -> list[Entry]:
+    def regions(cls, data: Data) -> list[Region]:
         out = []
         try:
             with tarfile.open(fileobj=DataReader(data), mode="r:") as archive:
@@ -66,13 +71,37 @@ class Tar(Format):
                         break
                     if info is None:
                         break
-                    out.append(cls._entry(info))
+                    out.append(cls._region(info))
         except tarfile.TarError as e:
             logger.warning(f"not a readable tar: {e}")
         return out
 
+    @classmethod
+    def fixup(cls, data: Data, region: Region, size: int) -> Region:
+        """Rewrite the member's size and header checksum, and re-pad it to a whole block."""
+        header_at = region.data_start - BLOCK
+        if header_at > region.start and b" size=" in data.read(region.start, header_at - region.start):
+            raise ResizeError("tar: the size is in a pax header, which can't be updated yet")
+        if size >= 8**11:
+            raise ResizeError("tar: too big for a size field")
+        header = bytearray(data.read(header_at, BLOCK))
+        header[SIZE_FIELD] = f"{size:011o}\0".encode()
+        header[CHECKSUM_FIELD] = b" " * 8
+        header[CHECKSUM_FIELD] = f"{sum(header):06o}\0 ".encode()
+        data.write(header_at + SIZE_FIELD.start, bytes(header[SIZE_FIELD]))
+        data.write(header_at + CHECKSUM_FIELD.start, bytes(header[CHECKSUM_FIELD]))
+
+        old_padding = region.stop - region.data_stop
+        new_padding = -size % BLOCK
+        padding_at = region.data_start + size
+        if new_padding > old_padding:
+            data.insert(padding_at, bytes(new_padding - old_padding))
+        elif new_padding < old_padding:
+            data.delete(padding_at, old_padding - new_padding)
+        return replace(region, stop=padding_at + new_padding, data_size=size)
+
     @staticmethod
-    def _entry(info: tarfile.TarInfo) -> Entry:
+    def _region(info: tarfile.TarInfo) -> Region:
         size = info.size if info.isreg() else 0
         padded = -(-size // BLOCK) * BLOCK
         kind = KINDS.get(info.type, "other")
@@ -80,7 +109,7 @@ class Tar(Format):
         name = info.name
         if info.issym() or info.islnk():
             name = f"{name} -> {info.linkname}"
-        return Entry(
+        return Region(
             name=name,
             start=info.offset,
             stop=info.offset_data + padded,
