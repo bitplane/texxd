@@ -104,6 +104,8 @@ class Node:
         if self._region is None:
             return None
         start = self.span.to_parent(0)
+        if not self.fmt.listed:
+            return self.fmt.find_region(self.parent.data, start, self._region.name)
         region = self.parent.region_before(start + 1, self.fmt)
         if region is not None and region.data_start == start and region.name == self._region.name:
             return region
@@ -136,7 +138,7 @@ class Node:
         if self._formats is None:
             formats = detect(self.data)
             if self.fmt is not None:
-                formats = [fmt for fmt in formats if fmt.nests or fmt.name != self.fmt.name]
+                formats = [fmt for fmt in formats if fmt.nests or fmt.contents != self.fmt.contents]
             self._formats = formats
         return self._formats
 
@@ -164,6 +166,11 @@ class Node:
         regions = self.regions(fmt)
         i = bisect_right(regions, offset - 1, key=lambda r: r.start) - 1
         return regions[i] if i >= 0 else None
+
+    @property
+    def children(self) -> list["Node"]:
+        """The nodes opened from this one that are still valid."""
+        return [node for node in self._children if node.valid]
 
     def walk(self) -> Iterator["Node"]:
         """This node and all its open descendants, parents first."""

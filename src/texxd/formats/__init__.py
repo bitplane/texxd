@@ -57,8 +57,11 @@ class Format:
     can_resize = False
     # what the data opened from its regions is: "bytes", or "text" (always UTF-8)
     contents = "bytes"
-    # False if data opened by this format shouldn't be detected as this format again
+    # False if data opened by this format shouldn't be detected as this format again,
+    # or as any other non-nesting format with the same contents (text as text again)
     nests = True
+    # True if regions() lists every region it can open; if not, find_region() finds one
+    listed = True
 
     @classmethod
     def sniff(cls, data: Data) -> float:
@@ -69,6 +72,11 @@ class Format:
     def regions(cls, data: Data) -> list[Region]:
         """Parse the structure into top level regions, in order. Formats without structure return []."""
         return []
+
+    @classmethod
+    def find_region(cls, data: Data, data_start: int, name: str) -> Optional[Region]:
+        """For formats that don't list their regions: the region whose contents start at ``data_start``."""
+        return None
 
     @classmethod
     def for_region(cls, region: Region) -> type["Format"]:

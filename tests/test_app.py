@@ -484,3 +484,68 @@ async def test_json_tree(tmp_path):
         assert "▸ authors: [{" in view.render_line(3).text and view.cursor.position == 0x17
         # the selected node's bytes are highlighted in the other levels
         assert view.selection.ranges[0][:2] == (0x17, 0x17 + len('"authors": [{"name": "Gaz"}, {"name": "Claude"}]'))
+
+
+async def open_tree(pilot, view):
+    await pilot.press("tab", "tab", "enter")
+    await pilot.pause()
+    assert view.active == (1, 0)
+
+
+async def test_editing_json_values_in_place(tmp_path):
+    path = tmp_path / "app.json"
+    path.write_bytes(b'{\n  "v": "1.0",\n  "n": 3,\n  "ok": false\n}\n')
+    app = TexxdApp(path)
+    async with app.run_test(size=(160, 30)) as pilot:
+        await pilot.pause()
+        view = hex_view(app)
+        await open_tree(pilot, view)
+        tree = view.active_column
+        # Enter edits a number; something that isn't JSON isn't written, and editing carries on
+        await pilot.press("down", "down", "enter", "backspace", "x", "enter")
+        await pilot.pause()
+        assert tree.editing is not None and app.buffer.read(0, 40).count(b"3") == 1
+        await pilot.press("backspace", "4", "2", "enter")
+        await pilot.pause()
+        assert tree.editing is None and b'"n": 42,' in app.buffer.read(0, 60)
+        # typing starts over; Escape forgets it
+        await pilot.press("down", "n", "u", "escape")
+        assert tree.editing is None and b'"ok": false' in app.buffer.read(0, 60)
+        await pilot.press("t", "r", "u", "e", "enter")
+        await pilot.pause()
+        # strings are edited as their text
+        await pilot.press("up", "up", "enter", "home", *'a "big" ', "enter")
+        await pilot.pause()
+        assert app.buffer.read(0, 60) == b'{\n  "v": "a \\"big\\" 1.0",\n  "n": 42,\n  "ok": true\n}\n'
+        # each value was one edit
+        await pilot.press("ctrl+z")
+        await pilot.pause()
+        assert b'"v": "1.0"' in app.buffer.read(0, 60)
+
+
+async def test_opening_a_json_string_as_text(tmp_path):
+    path = tmp_path / "app.json"
+    path.write_bytes(b'{"notes": "line one", "n": 1}')
+    app = TexxdApp(path)
+    async with app.run_test(size=(160, 30)) as pilot:
+        await pilot.pause()
+        view = hex_view(app)
+        await open_tree(pilot, view)
+        await pilot.press("down", "right")
+        await pilot.pause()
+        assert view.node.name == "$.notes" and view.data.read(0, 20) == b"line one"
+        await pilot.press("ctrl+end", "enter", *'two "2"')
+        await pilot.pause()
+        assert view.data.read(0, 30) == b'line one\ntwo "2"'
+        # until it's written back, the tree marks the value as edited
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert view.active == (1, 0)
+        assert any("✎" in view.render_line(y).text for y in range(1, 4))
+        # closing the level writes it back
+        view.set_active(2, 1)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert len(view.levels) == 2
+        assert app.buffer.read(0, 60) == b'{"notes": "line one\\ntwo \\"2\\"", "n": 1}'
+        assert not any("✎" in view.render_line(y).text for y in range(1, 4))

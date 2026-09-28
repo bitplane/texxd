@@ -7,7 +7,7 @@ import pytest
 
 from texxd.data import Buffer, BytesSource
 from texxd.formats import detect
-from texxd.formats.json import Json, parse
+from texxd.formats.json import Json, encode_string, parse
 from texxd.view.tree import TreeRows
 
 
@@ -161,3 +161,25 @@ def test_big_json_lines_are_lazy():
     assert rows.count == 200_000 + 2 + (150_000 % 3)
     assert root._children.count(None) > 199_000  # only the records looked at were parsed
     assert rows.node(150_000 + 2).path == "$[150000].tags"
+
+
+def test_editing_values():
+    root = parse(b'{"s": "a\\n\\"b\\"", "n": 1.5, "t": true, "u": "\\u00e9"}')
+    s, n, t, u = root.children
+    assert s.edit_text() == 'a\n"b"' and n.edit_text() == "1.5" and u.edit_text() == "é"
+    assert s.encode_edit('new "v"\n') == b'"new \\"v\\"\\n"'
+    assert n.encode_edit(" 2e3 ") == b"2e3" and t.encode_edit("null") == b"null"
+    with pytest.raises(ValueError):
+        n.encode_edit("nope")
+    # anything valid goes, even another kind of value
+    assert n.encode_edit('{"x": [1]}') == b'{"x": [1]}'
+    assert all(node.editable for node in (s, n, t, u)) and not root.editable
+    fmt, region = s.opening()
+    assert fmt.name == "json string" and (region.start, region.stop, region.name) == (6, 16, "$.s")
+    assert n.opening() is None
+
+
+def test_encoding_strings_keeps_characters():
+    assert encode_string("é ☃ \t") == '"é ☃ \\t"'.encode()
+    # lone surrogates can't be UTF-8, so they're escaped
+    assert encode_string("\ud800") == b'"\\ud800"'

@@ -486,9 +486,19 @@ class HexView(ScrollView, can_focus=True):
         self.set_active(len(self.levels) - 1, self.levels[-1].default_column, target)
 
     def close_levels_after(self, index: int) -> None:
-        """Close the levels to the right of ``index``."""
+        """Close the levels to the right of ``index``.
+
+        Closing a level means being done with it, so edits to derived data in
+        it (a decompressed stream, a string's text) are written back first.
+        """
         if index < 0 or index >= len(self.levels) - 1:
             return
+        for level in reversed(self.levels[index + 1 :]):
+            if level.node.stale:
+                try:
+                    level.node.commit()
+                except (EditError, NotImplementedError) as e:
+                    self.notify(f"Couldn't write {level.node.name} back: {e}", severity="error")
         old = self.level
         closing_active = self.active[0] > index
         origin = self.levels[index + 1].origin
@@ -696,6 +706,24 @@ class HexView(ScrollView, can_focus=True):
         if ok:
             self.cursor.move(1)
         self._cursor_moved()
+
+    def replace(self, start: int, stop: int, data: bytes) -> bool:
+        """Replace bytes ``start`` to ``stop`` of the level with the cursor with ``data``, as one edit.
+
+        Returns True if it worked.
+        """
+        target = self.data
+
+        def edit() -> None:
+            if len(data) == stop - start:
+                # the same size: an overwrite, which works even where things can't be resized
+                target.write(start, data)
+                return
+            with target.root.transaction():
+                target.delete(start, stop - start)
+                target.insert(start, data)
+
+        return self._edit(edit)
 
     def type_text(self, text: str) -> None:
         """Type text at the cursor, for levels whose data is UTF-8 text."""

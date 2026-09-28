@@ -466,7 +466,7 @@ class TextEditColumn(Column):
 
     def describe(self, offset: int) -> Optional[str]:
         rows = self._rows
-        encoding = self.node.fmt.encoding if self.node.fmt else None
+        encoding = getattr(self.node.fmt, "encoding", None)
         where = f"line {rows.line_of(offset) + 1}" if rows else None
         return " │ ".join(part for part in (where, encoding and f"{encoding} (^e)") if part)
 

@@ -21,7 +21,7 @@ from bisect import bisect_right
 from dataclasses import replace
 from typing import Optional
 
-from ..data import Data
+from ..data import Buffer, BytesSource, Data, EditError
 from . import Format, Region
 
 SAMPLE = 64 * 1024
@@ -37,6 +37,7 @@ STRUCTURE = re.compile(rb'"(?:[^"\\\n]|\\.)*"?|[\[\]{}]')
 GARBAGE = re.compile(rb'[^,:\[\]{}\s"]+')
 CLOSERS = {ord("{"): ord("}"), ord("["): ord("]")}
 SPACES = re.compile(r"\s+")
+SURROGATE = re.compile(r"[\ud800-\udfff]")
 
 
 def _skip_space(buffer: bytes, pos: int, end: int) -> int:
@@ -205,6 +206,33 @@ class JsonNode:
         except ValueError:
             return None
 
+    # editing
+
+    @property
+    def editable(self) -> bool:
+        return not self.container and self.kind != "error" and self.stop > self.start
+
+    def edit_text(self) -> str:
+        """The value as it's edited: a string's text, or anything else's JSON."""
+        if self.kind == "string" and self.error is None:
+            return self.value
+        return self.buffer[self.start : self.stop].decode("utf-8", "replace")
+
+    def encode_edit(self, text: str) -> bytes:
+        """The bytes to replace this value with, for edited ``text``. Raises ValueError if it isn't valid."""
+        if self.kind == "string" and self.error is None:
+            return encode_string(text)
+        json.loads(text)
+        return text.strip().encode("utf-8")
+
+    def opening(self) -> Optional[tuple[type[Format], Region]]:
+        """What this value can be opened as, in a level of its own: strings open as their text."""
+        if self.kind != "string" or self.error is not None:
+            return None
+        return JsonString, Region(
+            self.path, self.start, self.stop, self.start, self.stop - self.start, kind="string", openable=True
+        )
+
     # parsing
 
     def _parse_children(self) -> list["JsonNode"]:
@@ -312,6 +340,54 @@ def _lines(buffer: bytes) -> tuple[list[int], list[int]]:
             ends.append(end)
         pos = end + 1
     return starts, ends
+
+
+def encode_string(text: str) -> bytes:
+    """``text`` as a JSON string, with characters kept as they are (bar lone surrogates, which UTF-8 can't hold)."""
+    literal = json.dumps(text, ensure_ascii=False)
+    literal = SURROGATE.sub(lambda match: f"\\u{ord(match.group()):04x}", literal)
+    return literal.encode("utf-8")
+
+
+class JsonString(Format):
+    """A JSON string's text: open one to edit it as text, and it's escaped again when it's committed."""
+
+    name = "json string"
+    contents = "text"
+    can_resize = True
+    # strings aren't listed: there can be millions of them
+    listed = False
+
+    @classmethod
+    def find_region(cls, data: Data, data_start: int, name: str) -> Optional[Region]:
+        size = 4096
+        while True:
+            raw = data.read(data_start, size)
+            match = STRING.match(raw)
+            if match:
+                stop = data_start + match.end()
+                return Region(name, data_start, stop, data_start, stop - data_start, kind="string", openable=True)
+            # strings can't hold line breaks: if there's one, it isn't a string any more
+            if len(raw) < size or b"\n" in raw:
+                return None
+            size *= 4
+
+    @classmethod
+    def open(cls, data: Data, region: Region) -> Data:
+        try:
+            text = json.loads(data.read(region.data_start, region.data_size))
+        except ValueError as e:
+            raise EditError(f"not a valid string: {e}") from e
+        return Buffer(BytesSource(text.encode("utf-8", "surrogatepass")), parent=data)
+
+    @classmethod
+    def encode(cls, data: Data, region: Region, contents: Data) -> bytes:
+        return encode_string(contents.read(0, contents.size).decode("utf-8", "surrogatepass"))
+
+    @classmethod
+    def fixup(cls, data: Data, region: Region, size: int) -> Region:
+        # nothing in JSON records how long a string is
+        return replace(region, stop=region.data_start + size, data_size=size)
 
 
 class Json(Format):
