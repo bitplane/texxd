@@ -1,6 +1,7 @@
 # texxd
 
-A terminal hex editor built with Textual.
+A terminal hex editor built with Textual, that decodes many types of files and
+can edit nested data inside them.
 
 ## Usage
 
@@ -24,11 +25,3 @@ WTFPL with one additional clause
 1. Don't blame me
 
 Do wtf you want with it, but you're on your own.
-
-## todo
-
-- [ ] support drag-select
-- [ ] style text
-  - [ ] Change Highlighter to Styler (use CSS to style rendered text)
-  - [ ] find as CSS classes
-  - [ ] binary diff tool as a highlighter
