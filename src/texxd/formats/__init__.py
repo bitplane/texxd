@@ -121,12 +121,13 @@ class Binary(Format):
 
 def registry() -> list[type[Format]]:
     """All known formats."""
+    from .compression import Bzip2, Lzma, Xz, Zlib
     from .gzip import Gzip
     from .json import Json
     from .tar import Tar
     from .text import Text
 
-    return [Gzip, Tar, Json, Text, Binary]
+    return [Gzip, Bzip2, Xz, Lzma, Zlib, Tar, Json, Text, Binary]
 
 
 def detect(data: Data) -> list[type[Format]]:
