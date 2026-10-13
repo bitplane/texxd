@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Iterator, Optional
 
-from .data import Buffer, Change, Data, ResizeError, Window
+from .data import Buffer, BytesSource, Change, Data, ResizeError, Source, TemporarySource, Window
 from .formats import Format, Region, detect
 from .log import get_logger
 
@@ -264,10 +264,15 @@ class Node:
         if not self.derived or not data.modified:
             return
         encoded = self.fmt.encode(self.parent.data, self.region, data)
-        with data.transaction():
-            data.history.record(data)
-            span = self.span
-            if len(encoded) < span.size:
-                span.delete(len(encoded), span.size - len(encoded))
-            span.write(0, encoded)
-            data.mark_saved()
+        if not isinstance(encoded, Source):
+            encoded = BytesSource(encoded)
+        try:
+            with data.transaction():
+                data.history.record(data)
+                span = self.span
+                span.splice(0, span.size, encoded)
+                data.mark_saved()
+        except BaseException:
+            if isinstance(encoded, TemporarySource):
+                encoded.close()
+            raise

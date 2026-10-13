@@ -7,14 +7,15 @@ keeping them; opening keeps the decoded contents in an editable buffer.
 import bz2
 import lzma
 import zlib
+from collections.abc import Iterator
 from dataclasses import replace
 
-from ..data import Buffer, BytesSource, Data, EditError
+from ..data import Buffer, Data, EditError, Source, TemporarySource
 from ..log import get_logger
 from . import Format, Region
+from .stream import CHUNK, Decoded, decode_chunks
 
 logger = get_logger(__name__)
-CHUNK = 64 * 1024
 LZMA_MEMORY_LIMIT = 128 * 1024 * 1024
 DECODE_ERRORS = (ValueError, OSError, EOFError, lzma.LZMAError, zlib.error)
 
@@ -40,31 +41,17 @@ class Compressed(Format):
         raise NotImplementedError
 
     @classmethod
-    def _decode(cls, data: Data, start: int, collect: bool = False) -> tuple[bytes, int, int]:
-        decoder = cls.decompressor()
-        out = []
-        size = 0
-        at = start
-        while not decoder.eof:
-            if hasattr(decoder, "unconsumed_tail"):
-                pending = decoder.unconsumed_tail
-                needs_input = not pending
-            else:
-                pending = b""
-                needs_input = decoder.needs_input
-            if needs_input:
-                pending = data.read(at, CHUNK)
-                if not pending:
-                    raise ValueError("stream is truncated")
-                at += len(pending)
-            chunk = decoder.decompress(pending, CHUNK)
-            size += len(chunk)
-            if collect:
-                out.append(chunk)
-        stop = at - len(decoder.unused_data)
-        if stop - start < cls.minimum_size:
+    def _chunks(cls, data: Data, start: int, result: Decoded) -> Iterator[bytes]:
+        yield from decode_chunks(data, start, cls.decompressor(), result)
+        if result.stop - start < cls.minimum_size:
             raise ValueError("stream has no compressed payload")
-        return b"".join(out), size, stop
+
+    @classmethod
+    def _scan(cls, data: Data, start: int) -> Decoded:
+        result = Decoded()
+        for _ in cls._chunks(data, start, result):
+            pass
+        return result
 
     @classmethod
     def sniff(cls, data: Data) -> float:
@@ -73,7 +60,7 @@ class Compressed(Format):
         # LZMA-alone and zlib have weak headers: validate before offering them.
         if cls.weak_magic:
             try:
-                cls._decode(data, 0)
+                cls._scan(data, 0)
             except DECODE_ERRORS:
                 return 0.0
         return 0.9
@@ -88,29 +75,36 @@ class Compressed(Format):
         start = 0
         while start < data.size and cls.matches(data, start):
             try:
-                _, size, stop = cls._decode(data, start)
+                result = cls._scan(data, start)
             except DECODE_ERRORS as e:
                 logger.warning(f"{cls.name} parse stopped early: {e}")
                 break
-            out.append(Region("(contents)", start, stop, start, stop - start, openable=True, info=(f"{size} bytes",)))
+            stop = result.stop
+            out.append(
+                Region("(contents)", start, stop, start, stop - start, openable=True, info=(f"{result.size} bytes",))
+            )
             start = cls.next_start(data, stop)
         return out
 
     @classmethod
     def open(cls, data: Data, region: Region) -> Data:
         try:
-            contents, _, _ = cls._decode(data, region.data_start, collect=True)
+            source = TemporarySource(cls._chunks(data, region.data_start, Decoded()))
         except DECODE_ERRORS as e:
             raise EditError(f"couldn't decode {cls.name}: {e}") from e
-        return Buffer(BytesSource(contents), parent=data)
+        return Buffer(source, parent=data)
 
     @classmethod
-    def encode(cls, data: Data, region: Region, contents: Data) -> bytes:
+    def _encoded_chunks(cls, data: Data, region: Region, contents: Data) -> Iterator[bytes]:
+        encoder = cls.compressor(data, region)
+        for offset in range(0, contents.size, CHUNK):
+            yield encoder.compress(contents.read(offset, CHUNK))
+        yield encoder.flush()
+
+    @classmethod
+    def encode(cls, data: Data, region: Region, contents: Data) -> Source:
         try:
-            encoder = cls.compressor(data, region)
-            out = [encoder.compress(contents.read(offset, CHUNK)) for offset in range(0, contents.size, CHUNK)]
-            out.append(encoder.flush())
-            return b"".join(out)
+            return TemporarySource(cls._encoded_chunks(data, region, contents))
         except DECODE_ERRORS as e:
             raise EditError(f"couldn't encode {cls.name}: {e}") from e
 

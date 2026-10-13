@@ -13,6 +13,7 @@ undo step, and if any part fails the whole thing is rolled back.
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Optional
+from weakref import WeakSet
 
 if TYPE_CHECKING:
     from .buffer import Buffer, Change
@@ -39,6 +40,11 @@ class History:
         self._redo_before: list[_Step] = []
         self._deferred: dict[Any, tuple[int, Callable[[], None]]] = {}
         self._listeners: list[Callable[[], None]] = []
+        self._buffers: WeakSet[Buffer] = WeakSet()
+
+    def register(self, buffer: "Buffer") -> None:
+        """Track buffers for document cleanup, including invalidated nodes."""
+        self._buffers.add(buffer)
 
     @property
     def can_undo(self) -> bool:
@@ -81,6 +87,7 @@ class History:
             self._depth -= 1
             if self._depth == 0:
                 self._step = None
+                self._redo_before = []
                 self._deferred.clear()
                 self._settled()
 
@@ -170,4 +177,17 @@ class History:
         """Forget every step, like after saving."""
         self._undo.clear()
         self._redo.clear()
+        self._redo_before = []
         self._settled()
+
+    def close(self) -> None:
+        """Release all storage and callbacks belonging to this document."""
+        self._listeners.clear()
+        self._undo.clear()
+        self._redo.clear()
+        self._redo_before = []
+        self._step = None
+        self._deferred.clear()
+        for buffer in list(self._buffers):
+            buffer.close()
+        self._buffers.clear()

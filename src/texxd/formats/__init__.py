@@ -7,7 +7,7 @@ regions. Some regions can be opened, giving the data for a child node.
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from ..data import Data, ResizeError, Window
+from ..data import Data, ResizeError, Source, Window
 
 
 @dataclass(frozen=True)
@@ -100,8 +100,8 @@ class Format:
         raise ResizeError(f"{cls.name} can't resize its contents")
 
     @classmethod
-    def encode(cls, data: Data, region: Region, contents: Data) -> bytes:
-        """The bytes to write over ``region``'s contents in ``data`` for edited derived ``contents``.
+    def encode(cls, data: Data, region: Region, contents: Data) -> bytes | Source:
+        """Bytes or a source to replace edited derived contents in their parent.
 
         Only needed by formats whose open() gives derived data, like a
         decompressed stream. ``region`` is where the contents are now.

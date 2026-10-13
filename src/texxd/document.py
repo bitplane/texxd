@@ -76,3 +76,7 @@ class Document:
         self.commit()
         self.buffer.save(path)
         self.path = path
+
+    def close(self) -> None:
+        """Release the file, decoded data and storage held by undo history."""
+        self.history.close()

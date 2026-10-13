@@ -1,8 +1,8 @@
 """Editable byte buffers.
 
 ``Buffer`` is a piece table: the current contents are described by a RangeMap
-of pieces, each pointing into either the original source or an append-only
-buffer of added bytes. Nothing is copied until save.
+of pieces, each pointing into the original source, an append-only buffer of
+added bytes, or a source spliced in without copying. Nothing is copied until save.
 
 ``Window`` is a view onto part of another buffer. Reads and edits go straight
 through to the parent, so all edits live in the root buffer and saving the
@@ -115,6 +115,10 @@ class Data:
         """Remove ``size`` bytes at ``offset``."""
         raise ResizeError("can't delete here")
 
+    def splice(self, offset: int, size: int, source: Source, origin: "Data | None" = None) -> None:
+        """Replace a range with a source without copying its bytes."""
+        raise NotImplementedError()
+
     def edits(self, start: int, stop: int) -> list[Tuple[int, int]]:
         """Ranges within [start, stop) that have unsaved changes."""
         raise NotImplementedError()
@@ -176,7 +180,7 @@ class Data:
             listener(change)
 
 
-def _adjust_piece(piece: Tuple[int, int], moved: int) -> Tuple[int, int]:
+def _adjust_piece(piece: tuple[int | Source, int], moved: int) -> tuple[int | Source, int]:
     """Keep a piece pointing at the same source bytes when it moves."""
     source, delta = piece
     return source, delta - moved
@@ -203,6 +207,7 @@ class Buffer(Data):
         self._saved_version = 0
         # derived data shares its history with the data it came from
         self.history: History = parent.root.history if parent is not None else History()
+        self.history.register(self)
         # called with each new edit before it's made; they raise to refuse it
         self.guards: list[Listener] = []
 
@@ -250,8 +255,10 @@ class Buffer(Data):
             hi = min(end, stop) + delta
             if source == ORIGINAL:
                 out += self._source.read(lo, hi - lo)
-            else:
+            elif source == ADDED:
                 out += self._added[lo:hi]
+            else:
+                out += source.read(lo, hi - lo)
         return bytes(out)
 
     def transaction(self) -> ContextManager[None]:
@@ -347,6 +354,24 @@ class Buffer(Data):
             self._size -= size
             self._emit(change)
 
+    def splice(self, offset: int, size: int, source: Source, origin: Data | None = None) -> None:
+        if not 0 <= offset <= self._size or not 0 <= size <= self._size - offset:
+            raise IndexError("replacement outside buffer")
+        if size != source.size and not self.resizable:
+            raise ResizeError("can't resize here")
+        if size == source.size == 0:
+            return
+        change = Change(offset, size, source.size, origin)
+        self._check(change)
+        with self.transaction():
+            self._record(change)
+            self._pieces.shift(offset, -size)
+            self._pieces.shift(offset, source.size)
+            if source.size:
+                self._pieces[offset : offset + source.size] = (source, -offset)
+            self._size += change.delta
+            self._emit(change)
+
     def undo(self) -> Optional[Change]:
         """Undo the last step. Returns the change it started with, undone, or None if there was nothing to undo."""
         where = self.history.undo()
@@ -360,7 +385,7 @@ class Buffer(Data):
     def edits(self, start: int, stop: int) -> list[Tuple[int, int]]:
         out = []
         for lo, hi, (source, _) in self._pieces.overlapping(start, stop):
-            if source != ADDED:
+            if source == ORIGINAL:
                 continue
             lo, hi = max(lo, start), min(hi, stop)
             if out and out[-1][1] == lo:
@@ -378,6 +403,10 @@ class Buffer(Data):
         if not isinstance(source, FileSource) or not source.writable:
             return False
         if os.path.realpath(source.path) != os.path.realpath(path):
+            return False
+        # A source may itself read from the destination file. Rewriting avoids
+        # changing bytes that a later piece still needs to read.
+        if any(isinstance(src, Source) for _, _, (src, _) in self._pieces):
             return False
         return all(delta == 0 for _, _, (src, delta) in self._pieces if src == ORIGINAL)
 
@@ -428,12 +457,19 @@ class Buffer(Data):
             if os.path.exists(tmp):
                 os.unlink(tmp)
             raise
-        self._source.close()
+        if isinstance(self._source, FileSource):
+            self._source.close()
         self._source = FileSource(path)
 
     def close(self) -> None:
-        """Release the source."""
-        self._source.close()
+        """Release this buffer's storage; snapshots retain their own references."""
+        if isinstance(self._source, FileSource):
+            self._source.close()
+        self._source = BytesSource()
+        self._pieces = RangeMap(_adjust_piece)
+        self._added = bytearray()
+        self._size = 0
+        self.valid = False
 
 
 class Window(Data):
@@ -497,6 +533,13 @@ class Window(Data):
         if not self.resizable:
             raise ResizeError("can't delete here")
         self.parent.delete(self.start + offset, size, origin or self)
+
+    def splice(self, offset: int, size: int, source: Source, origin: Data | None = None) -> None:
+        if not 0 <= offset <= self._size or not 0 <= size <= self._size - offset:
+            raise IndexError("replacement outside window")
+        if size != source.size and not self.resizable:
+            raise ResizeError("can't resize here")
+        self.parent.splice(self.start + offset, size, source, origin or self)
 
     def to_parent(self, offset: int) -> Optional[int]:
         return self.start + offset if 0 <= offset <= self._size else None

@@ -56,6 +56,9 @@ class TexxdApp(App):
         self.sub_title = self.document.name
         self.query_one(HexView).focus()
 
+    def on_unmount(self) -> None:
+        self.document.close()
+
     def on_location_changed(self, message: LocationChanged) -> None:
         # names like "[json]" aren't markup
         self.query_one(StatusBar).update(escape(self.query_one(HexView).status))

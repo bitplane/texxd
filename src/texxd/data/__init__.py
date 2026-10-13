@@ -4,7 +4,7 @@ from .buffer import Buffer, Change, Data, EditError, ResizeError, Window
 from .history import History
 from .io import DataReader
 from .rangemap import RangeMap
-from .source import BytesSource, FileSource, Source
+from .source import BytesSource, FileSource, Source, TemporarySource
 
 __all__ = [
     "Buffer",
@@ -18,5 +18,6 @@ __all__ = [
     "RangeMap",
     "ResizeError",
     "Source",
+    "TemporarySource",
     "Window",
 ]
