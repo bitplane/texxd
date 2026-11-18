@@ -5,19 +5,27 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Iterator, Optional
 
-from .data import Buffer, BytesSource, Change, Data, ResizeError, Source, TemporarySource, Window
+from .data import Buffer, BytesSource, Change, Data, EditError, ResizeError, Source, TemporarySource, Window
 from .formats import Format, Region, detect
 from .log import get_logger
 
 logger = get_logger(__name__)
 
 
-class StaleError(Exception):
+class StaleError(EditError):
     """Raised for an edit to encoded bytes whose decoded data has edits that haven't been committed."""
 
-    def __init__(self, node: "Node"):
+    def __init__(self, node: "Node", boundary: "Node"):
         super().__init__(f"{node.name} has edits that aren't in {node.parent.name} yet")
         self.node = node
+        self.boundary = boundary
+
+    def commit(self) -> None:
+        """Write the conflicting edit back as far as the shared buffer."""
+        for layer in self.node._encodings():
+            layer.commit()
+            if layer is self.boundary:
+                break
 
 
 class Node:
@@ -64,8 +72,9 @@ class Node:
                 self.span = data
             else:
                 self.span = Window(parent.data, region.data_start, region.data_size)
-                self.span.root.guards.append(self._guard)
             self.span.subscribe(self._on_span_change)
+        if data is self.buffer:
+            self.buffer.guards.append(self._guard)
 
     @classmethod
     def open(cls, path: Path) -> "Node":
@@ -207,15 +216,84 @@ class Node:
         elif self.derived:
             self._redecode()
 
-    def _guard(self, change: Change) -> None:
-        """Refuse edits to the span's bytes, other than through it, while they're stale."""
-        if not self.stale or change.made_through(self.span):
+    def _encodings(self) -> Iterator["Node"]:
+        """The encoded spans between this data and the file, innermost first."""
+        node = self
+        while node.parent is not None:
+            if node.derived:
+                yield node
+            node = node.parent
+
+    def stale_ranges(
+        self, offset: int, size: int, change: Change | None = None
+    ) -> Iterator[tuple[int, int, "Node", "Node"]]:
+        """Yield (start, stop, writer, encoding) for pending writes touching a range.
+
+        Offsets belong to this node. A zero-length query checks an insertion:
+        an insert at the edge of an encoded span can move it without changing
+        its contents. An independent decoding of overlapping bytes, however,
+        has to be refreshed before it can be edited anywhere.
+        """
+        # At each encoding boundary, a write could replace the entire span.
+        # Compare paths at their nearest shared buffer, where offsets agree.
+        writers = [node for node in self.path[0].walk() if node.stale]
+        if not writers:
             return
-        start = self.span.to_buffer(0)
-        stop = start + self.span.size
+        inputs = {self.buffer: None}
+        for layer in self._encodings():
+            inputs[layer.span.root] = layer.span
+        base = self.data.to_buffer(0)
+        if base is None:
+            return
+        # Resolve descendants first so discarding a writer never loses a pending child edit.
+        for writer in reversed(writers):
+            if writer.buffer in inputs:
+                continue
+            for layer in writer._encodings():
+                span = layer.span
+                if span.root not in inputs:
+                    continue
+                start = span.to_buffer(0)
+                if start is None:
+                    break
+                stop = start + span.size
+                read = inputs[span.root]
+                if read is not None:
+                    # The two decodings diverge here. The last encoded bytes
+                    # can still be read, but their decoded offsets can't be mapped.
+                    other = read.to_buffer(0)
+                    if other is None:
+                        break
+                    same_empty_span = start == other and span.size == read.size == 0
+                    if same_empty_span or (start < other + read.size and other < stop):
+                        yield offset, offset + size, writer, layer
+                elif change is None or not change.made_through(span):
+                    at = base + offset
+                    if start < at + size and at < stop:
+                        yield max(offset, start - base), min(offset + size, stop - base), writer, layer
+                    elif change is None and size == 0 and start == stop == at:
+                        # An empty encoded span sitting exactly here. Only for queries:
+                        # an insert here is at its edge, so the guard lets it through.
+                        yield offset, offset, writer, layer
+                    elif change and change.delta and self._cuts_container(change, span):
+                        yield offset, offset, writer, layer
+                break
+
+    @staticmethod
+    def _cuts_container(change: Change, span: Data) -> bool:
+        """A resize crossing a window edge invalidates everything opened through it."""
         lo, hi = change.offset, change.offset + change.removed
-        if (lo < stop and hi > start) or start < lo < stop:
-            raise StaleError(self)
+        window = span.parent
+        while isinstance(window, Window):
+            start = window.to_buffer(0)
+            if lo < start < hi or lo < start + window.size < hi:
+                return True
+            window = window.parent
+        return False
+
+    def _guard(self, change: Change) -> None:
+        for _, _, writer, boundary in self.stale_ranges(change.offset, change.removed, change):
+            raise StaleError(writer, boundary)
 
     def _decode(self) -> Buffer:
         return self.fmt.open(self.parent.data, self.region)

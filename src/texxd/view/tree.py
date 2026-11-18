@@ -301,7 +301,7 @@ class TreeColumn(Column):
         else:
             parts.append((node.source(room), STYLES.get(node.kind)))
         opening = node.opening()
-        if opening and opening[1].data_start in self._edited():
+        if opening and next(self.node.stale_ranges(opening[1].data_start, opening[1].data_size), None):
             parts.insert(-1, ("✎ ", STYLES["summary"]))
         segments = []
         used = 0
@@ -331,10 +331,6 @@ class TreeColumn(Column):
         ]
         used = sum(len(segment.text) for segment in segments)
         return segments + [Segment(" " * max(0, self.wrap - used))]
-
-    def _edited(self) -> set[int]:
-        """Where the values are whose text is open with edits that haven't been written back."""
-        return {child.span.to_parent(0) for child in self.node.children if child.stale}
 
     def region_at(self, offset: int):
         rows = self._rows

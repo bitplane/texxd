@@ -190,7 +190,7 @@ class HexView(ScrollView, can_focus=True):
         # centre the cursor next time it has to scroll, for jumps
         self._center = False
         self.edits = EditHighlighter(node.data)
-        self.stale = StaleHighlighter(document, node.data)
+        self.stale = StaleHighlighter(self.node)
         self.selection = RangeHighlighter()
         self.highlights = Highlights()
         self.highlights["data"] = DataHighlighter()
@@ -236,6 +236,8 @@ class HexView(ScrollView, can_focus=True):
         pos = self.cursor.position
         mode = "INS" if self.insert_mode else "OVR"
         path = " › ".join(f"[{lv.base.name}]" if lv is self.level else lv.base.name for lv in self.levels)
+        if next(self.node.stale_ranges(pos, int(pos < size)), None):
+            path += " │ pending decoded edits"
         if size == 0:
             return f"{path} │ empty │ {mode}"
         percent = min(100, (pos + 1) * 100 // size)
@@ -482,7 +484,8 @@ class HexView(ScrollView, can_focus=True):
         old_rows = self.cursor.rows
         top = old_rows.start(max(0, min(int(self.scroll_y), old_rows.count - 1)))
         shift = self._shift(old, new)
-        self.edits.data = self.stale.data = self.data
+        self.edits.data = self.data
+        self.stale.node = self.node
         self._update_layout()
         self.cursor.set_position(position)
         self._update_selection()
@@ -517,19 +520,9 @@ class HexView(ScrollView, can_focus=True):
         self.set_active(len(self.levels) - 1, self.levels[-1].default_column, target)
 
     def close_levels_after(self, index: int) -> None:
-        """Close the levels to the right of ``index``.
-
-        Closing a level means being done with it, so edits to derived data in
-        it (a decompressed stream, a string's text) are written back first.
-        """
+        """Close the levels to the right of ``index``, keeping their document edits."""
         if index < 0 or index >= len(self.levels) - 1:
             return
-        for level in reversed(self.levels[index + 1 :]):
-            if level.node.stale:
-                try:
-                    level.node.commit()
-                except (EditError, NotImplementedError) as e:
-                    self.notify(f"Couldn't write {level.node.name} back: {e}", severity="error")
         old = self.level
         closing_active = self.active[0] > index
         origin = self.levels[index + 1].origin
@@ -676,16 +669,18 @@ class HexView(ScrollView, can_focus=True):
             self.notify(f"{self.node.name}{where} can't change size (yet)", severity="warning")
             return False
         except StaleError as e:
-            self._resolve_stale(e.node)
+            self._resolve_stale(e)
             return False
 
-    def _resolve_stale(self, node: Node) -> None:
+    def _resolve_stale(self, conflict: StaleError) -> None:
         """Ask what to do about derived data's uncommitted edits, for an edit to the bytes they'll replace."""
+
+        node = conflict.node
 
         def answer(choice: Optional[str]) -> None:
             try:
                 if choice == "commit":
-                    node.commit()
+                    conflict.commit()
                 elif choice == "discard":
                     node.discard()
             except (EditError, NotImplementedError) as e:
@@ -905,9 +900,6 @@ class HexView(ScrollView, can_focus=True):
         except Exception as e:
             self.notify(f"Can't show {level.base.name} as {view.name}: {e}", severity="error")
             return
-        if level.node.stale and shown is not level.node:
-            self.notify(f"{level.node.name} has edits: commit (^k) or undo them first", severity="warning")
-            return
         root = self.level.node.data.to_root(self.cursor.position)
         if shown is not level.node:
             # what's open to the right was opened from what it showed before
@@ -916,7 +908,8 @@ class HexView(ScrollView, can_focus=True):
         position = level.node.data.from_root(root) if root is not None else None
         self.active = (index, level.default_column)
         self.cursor.nibble = 0
-        self.edits.data = self.stale.data = self.data
+        self.edits.data = self.data
+        self.stale.node = self.node
         self._update_layout()
         self.cursor.set_position(position if position is not None else 0)
         self._center = True

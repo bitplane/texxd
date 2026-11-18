@@ -299,6 +299,7 @@ class Buffer(Data):
         change = Change(0, self._size, source.size)
         with self.transaction():
             if record:
+                self._check(change)
                 self._record(change)
             self._source = source
             self._pieces = RangeMap(_adjust_piece)

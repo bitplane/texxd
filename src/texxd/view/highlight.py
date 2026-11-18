@@ -12,7 +12,7 @@ from rich.style import Style
 from ..data import Data
 
 if TYPE_CHECKING:
-    from ..document import Document
+    from ..node import Node
 
 Styles = List[Optional[Style]]
 
@@ -86,22 +86,13 @@ class StaleHighlighter(Highlighter):
 
     style = Style(dim=True, italic=True, bgcolor="grey19")
 
-    def __init__(self, document: "Document", data: Data):
-        self.document = document
-        self.data = data
+    def __init__(self, node: "Node"):
+        self.node = node
 
     def highlight(self, data: bytes, offset: int, styles: Styles) -> None:
-        base = self.data.to_buffer(0)
-        if base is None:
-            return
-        end = offset + len(data)
-        for node in self.document.stale():
-            span = node.span
-            if span.root is not self.data.root:
-                continue
-            start = span.to_buffer(0) - base
-            for i in range(max(start, offset), min(start + span.size, end)):
-                styles[i - offset] = combine(styles[i - offset], self.style)
+        for start, stop, _, _ in self.node.stale_ranges(offset, len(data)):
+            for i in range(start - offset, stop - offset):
+                styles[i] = combine(styles[i], self.style)
 
 
 class RangeHighlighter(Highlighter):

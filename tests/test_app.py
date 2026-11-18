@@ -539,10 +539,40 @@ async def test_opening_a_json_string_as_text(tmp_path):
         await pilot.pause()
         assert view.active == (0, 0)
         assert any("✎" in view.render_line(y).text for y in range(1, 4))
-        # closing the level writes it back
+        # Closing the view keeps its edit pending. Explicit commit updates the tree.
         view.set_active(1, 1)
         await pilot.press("escape")
         await pilot.pause()
         assert len(view.levels) == 1
+        assert app.document.stale() and not app.buffer.modified
+        assert any("✎" in view.render_line(y).text for y in range(1, 4))
+        await pilot.press("ctrl+k")
+        await pilot.pause()
         assert app.buffer.read(0, 60) == b'{"notes": "line one\\ntwo \\"2\\"", "n": 1}'
         assert not any("✎" in view.render_line(y).text for y in range(1, 4))
+
+
+async def test_switching_between_decodings_with_pending_edits(tmp_path):
+    from texxd.view.registry import text_in
+
+    path = tmp_path / "notes"
+    path.write_bytes(b"Hello")
+    app = TexxdApp(path)
+    async with app.run_test(size=SIZE) as pilot:
+        view = hex_view(app)
+        view.show_view(0, text_in("latin-1"))
+        await pilot.press("J")
+        writer = view.node
+        edited = writer.data.read(0, writer.data.size)
+        assert writer.stale
+        use(view, "hex")
+        assert view.data.read(0, 5) == b"Hello"
+        view.show_view(0, text_in("cp1252"))
+        assert view.node is not writer and "pending decoded edits" in view.status
+        await pilot.press("x")
+        assert isinstance(app.screen, ChoiceModal)
+        await pilot.press("escape")
+        view.show_view(0, text_in("latin-1"))
+        assert view.node is writer and view.data.read(0, view.data.size) == edited
+        await pilot.press("ctrl+z")
+        assert not app.document.modified and path.read_bytes() == b"Hello"
